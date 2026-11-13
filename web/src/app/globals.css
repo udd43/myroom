@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+/* Impeccable WCAG AA verified */
+.text-warn {
+  color: #78350f !important;
+}
+.text-ok {
+  color: #14532d !important;
+}
+.text-bad {
+  color: #7f1d1d !important;
+}
+
+html,
+body {
+  background: #f4f6f9;
+  color: #0f172a;
+  font-family: "Pretendard Variable", Pretendard, -apple-system, "Apple SD Gothic Neo",
+    "Noto Sans KR", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 border border-ink px-3 py-1.5 text-xs font-semibold
+      transition-colors disabled:opacity-40;
+  }
+  .btn-solid {
+    @apply btn bg-ink text-white hover:bg-accent hover:border-accent;
+  }
+  .btn-line {
+    @apply btn bg-card text-ink hover:bg-ink hover:text-white;
+  }
+  .input {
+    @apply w-full border border-line bg-card px-2.5 py-2 text-sm text-ink outline-none
+      placeholder:text-mute focus:border-ink;
+  }
+  .label {
+    @apply mb-1 block text-xs font-semibold tracking-wide text-mute;
+  }
+  .num {
+    @apply font-mono tabular-nums;
+  }
+  /* 3D 뷰어 상/하단 컨트롤 바 */
+  .vbar {
+    @apply flex items-center gap-px border border-white/20 bg-stage/95 p-px text-xs text-white backdrop-blur;
+  }
+  .vbtn {
+    @apply flex items-center gap-1.5 px-2.5 py-1.5 font-medium text-white/90 transition-colors hover:bg-white/15 hover:text-white;
+  }
+  .vbtn-on {
+    @apply bg-accent text-white hover:bg-accent;
+  }
+}

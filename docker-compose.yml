@@ -1,0 +1,13 @@
+services:
+  myroom-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: myroom-server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./server/storage:/app/storage
+      - ./server/data:/app/data
+    restart: unless-stopped
+

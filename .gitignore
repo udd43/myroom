@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+server/.venv/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Next.js build & TypeScript caches
+web/.next/
+web/out/
+web/tsconfig.tsbuildinfo
+web/next-env.d.ts
+
+# Runtime generated backend data & uploaded scans/videos
+server/data/
+server/storage/
+
+# Environment & OS files
+.env
+.env*.local
+.DS_Store
+*.log
