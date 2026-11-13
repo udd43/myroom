@@ -1,15 +1,19 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Compass, LocateFixed, Pause, Play, Sun, X } from "lucide-react";
 import {
+  computeSolarDayEvents,
   DIRECTION_OPTIONS,
   formatMinutesToHHMM,
   KOREA_LOCATION_PRESETS,
+  OTHER_KOREA_LOCATION_PRESETS,
   RoomSunState,
   SEASON_PRESETS,
   SeasonPresetId,
+  SEOUL_DISTRICT_PRESETS,
 } from "@/lib/sunlight";
+import { requestBrowserGpsLocation } from "@/lib/locationClient";
 
 export interface SunlightParams {
   enabled: boolean;
@@ -45,26 +49,31 @@ export default function SunlightControlBar({
   onClose,
 }: Props) {
   const [locating, setLocating] = useState(false);
+  const [gpsError, setGpsError] = useState<string | null>(null);
 
-  const requestGps = () => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) return;
+  const dayOfYear = useMemo(
+    () => SEASON_PRESETS.find((s) => s.id === params.season)?.dayOfYear ?? 80,
+    [params.season]
+  );
+  const dayEvents = useMemo(
+    () => computeSolarDayEvents(dayOfYear, sunState.location.lat, sunState.location.lon),
+    [dayOfYear, sunState.location.lat, sunState.location.lon]
+  );
+
+  const requestGps = async () => {
     setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const lat = +pos.coords.latitude.toFixed(4);
-        const lon = +pos.coords.longitude.toFixed(4);
-        onUpdateRoomLocationAndDirection?.({
-          latitude: lat,
-          longitude: lon,
-          locationLabel: `현재 GPS (${lat.toFixed(2)}°N, ${lon.toFixed(2)}°E)`,
-        });
-        setLocating(false);
-      },
-      () => {
-        setLocating(false);
-      },
-      { enableHighAccuracy: true, timeout: 6000 }
-    );
+    setGpsError(null);
+    const res = await requestBrowserGpsLocation();
+    setLocating(false);
+    if (res.ok) {
+      onUpdateRoomLocationAndDirection?.({
+        latitude: res.latitude,
+        longitude: res.longitude,
+        locationLabel: res.locationLabel,
+      });
+    } else {
+      setGpsError(res.message);
+    }
   };
 
   return (
@@ -173,6 +182,7 @@ export default function SunlightControlBar({
             onChange={(e) => {
               const p = KOREA_LOCATION_PRESETS.find((x) => x.id === e.target.value);
               if (p) {
+                setGpsError(null);
                 onUpdateRoomLocationAndDirection?.({
                   latitude: p.lat,
                   longitude: p.lon,
@@ -180,17 +190,26 @@ export default function SunlightControlBar({
                 });
               }
             }}
-            className="max-w-[140px] border border-white/25 bg-stage px-1.5 py-0.5 text-[11px] text-white outline-none"
+            className="max-w-[175px] border border-white/25 bg-stage px-1.5 py-0.5 text-[11px] text-white outline-none"
             aria-label="지역 위치 선택"
           >
             <option value="">
               {sunState.location.label} ({sunState.location.lat.toFixed(2)}°N)
             </option>
-            {KOREA_LOCATION_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label} ({p.lat.toFixed(2)}°N)
-              </option>
-            ))}
+            <optgroup label="서울특별시 25개 자치구">
+              {SEOUL_DISTRICT_PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label} ({p.lat.toFixed(2)}°N)
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="전국 주요 지역">
+              {OTHER_KOREA_LOCATION_PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label} ({p.lat.toFixed(2)}°N)
+                </option>
+              ))}
+            </optgroup>
           </select>
 
           <button
@@ -201,7 +220,7 @@ export default function SunlightControlBar({
             title="브라우저/모바일 GPS 현재 위치 적용"
           >
             <LocateFixed className="h-3 w-3" />
-            <span>{locating ? "측정 중" : "GPS"}</span>
+            <span>{locating ? "측정 중" : "내 위치(GPS)"}</span>
           </button>
 
           <label className="flex cursor-pointer items-center gap-1 pl-1 text-white/85">
@@ -215,16 +234,27 @@ export default function SunlightControlBar({
           </label>
         </div>
 
-        <span
-          className={`px-1.5 py-0.5 font-semibold ${
-            sunState.isDirectSunlight
-              ? "bg-amber-400/20 text-amber-200"
-              : "bg-slate-400/20 text-slate-200"
-          }`}
-        >
-          {sunState.statusText}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="num text-white/70">
+            일출 {formatMinutesToHHMM(dayEvents.sunriseMin)} · 남중{" "}
+            {formatMinutesToHHMM(dayEvents.solarNoonMin)} · 일몰{" "}
+            {formatMinutesToHHMM(dayEvents.sunsetMin)}
+          </span>
+          <span
+            className={`px-1.5 py-0.5 font-semibold ${
+              sunState.isDirectSunlight
+                ? "bg-amber-400/20 text-amber-200"
+                : "bg-slate-400/20 text-slate-200"
+            }`}
+          >
+            {sunState.statusText}
+          </span>
+        </div>
       </div>
+
+      {gpsError && (
+        <div className="border-t border-white/15 pt-1 text-[11px] text-amber-200">{gpsError}</div>
+      )}
     </div>
   );
 }

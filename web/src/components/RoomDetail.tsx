@@ -9,12 +9,17 @@ import { CHECKLIST, GRADES, checklistScore } from "@/lib/checklist";
 import { engineLabel, man, monthlyTotal, sqm } from "@/lib/format";
 import {
   analyzeDailySunlight,
+  computeSolarDayEvents,
   DIRECTION_OPTIONS,
+  formatMinutesToHHMM,
   KOREA_LOCATION_PRESETS,
+  OTHER_KOREA_LOCATION_PRESETS,
   resolveRoomLocation,
   SEASON_PRESETS,
   SeasonPresetId,
+  SEOUL_DISTRICT_PRESETS,
 } from "@/lib/sunlight";
+import { requestBrowserGpsLocation, resolveAddressToCoords } from "@/lib/locationClient";
 
 interface Props {
   room: RoomItem;
@@ -135,6 +140,8 @@ export function RoomAnalysisSection({
   onUpdateRoom?: (patch: Partial<RoomItem>) => void;
 }) {
   const [locatingGps, setLocatingGps] = useState(false);
+  const [geocoding, setGeocoding] = useState(false);
+  const [locError, setLocError] = useState<string | null>(null);
   const [seasonId, setSeasonId] = useState<SeasonPresetId>("today");
 
   const sunLocation = useMemo(() => resolveRoomLocation(room), [room]);
@@ -146,24 +153,42 @@ export function RoomAnalysisSection({
     () => analyzeDailySunlight(room, selectedSeason.dayOfYear, true),
     [room, selectedSeason.dayOfYear]
   );
+  const solarEvents = useMemo(
+    () => computeSolarDayEvents(selectedSeason.dayOfYear, sunLocation.lat, sunLocation.lon),
+    [selectedSeason.dayOfYear, sunLocation.lat, sunLocation.lon]
+  );
 
-  const requestGps = () => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) return;
+  const requestGps = async () => {
     setLocatingGps(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const lat = +pos.coords.latitude.toFixed(4);
-        const lon = +pos.coords.longitude.toFixed(4);
-        onUpdateRoom?.({
-          latitude: lat,
-          longitude: lon,
-          locationLabel: `현재 GPS (${lat.toFixed(2)}°N, ${lon.toFixed(2)}°E)`,
-        });
-        setLocatingGps(false);
-      },
-      () => setLocatingGps(false),
-      { enableHighAccuracy: true, timeout: 6000 }
-    );
+    setLocError(null);
+    const res = await requestBrowserGpsLocation();
+    setLocatingGps(false);
+    if (res.ok) {
+      onUpdateRoom?.({
+        latitude: res.latitude,
+        longitude: res.longitude,
+        locationLabel: res.locationLabel,
+      });
+    } else {
+      setLocError(res.message);
+    }
+  };
+
+  const lookupAddressCoords = async () => {
+    if (!room.address?.trim()) return;
+    setGeocoding(true);
+    setLocError(null);
+    const hit = await resolveAddressToCoords(room.address);
+    setGeocoding(false);
+    if (hit) {
+      onUpdateRoom?.({
+        latitude: hit.latitude,
+        longitude: hit.longitude,
+        locationLabel: hit.locationLabel,
+      });
+    } else {
+      setLocError("주소 좌표를 찾지 못했습니다. 아래 서울 구/지역 선택에서 지정해 주세요.");
+    }
   };
 
   return (
@@ -239,10 +264,10 @@ export function RoomAnalysisSection({
             <span className="num text-mute">
               ({sunLocation.lat.toFixed(3)}°N, {sunLocation.lon.toFixed(3)}°E ·{" "}
               {sunLocation.source === "gps_saved"
-                ? "저장된 좌표"
+                ? "지정 좌표"
                 : sunLocation.source === "address"
-                  ? "주소 추정"
-                  : "서울 기본"}
+                  ? "서울/지역 주소 매핑"
+                  : "서울 기본 기준"}
               )
             </span>
             <button
@@ -254,11 +279,22 @@ export function RoomAnalysisSection({
               <LocateFixed className="h-3.5 w-3.5" />
               <span>{locatingGps ? "측정 중…" : "내 위치(GPS)"}</span>
             </button>
+            {room.address && (
+              <button
+                type="button"
+                onClick={lookupAddressCoords}
+                disabled={geocoding}
+                className="btn-line py-1 text-xs"
+              >
+                <span>{geocoding ? "조회 중…" : "주소 좌표 적용"}</span>
+              </button>
+            )}
             <select
               value=""
               onChange={(e) => {
                 const p = KOREA_LOCATION_PRESETS.find((x) => x.id === e.target.value);
                 if (p) {
+                  setLocError(null);
                   onUpdateRoom?.({
                     latitude: p.lat,
                     longitude: p.lon,
@@ -269,12 +305,21 @@ export function RoomAnalysisSection({
               className="input w-auto py-1 text-xs"
               aria-label="지역 기준 선택"
             >
-              <option value="">지역 프리셋 변경…</option>
-              {KOREA_LOCATION_PRESETS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
+              <option value="">서울 구·지역 선택…</option>
+              <optgroup label="서울특별시 25개 자치구">
+                {SEOUL_DISTRICT_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="전국 주요 지역">
+                {OTHER_KOREA_LOCATION_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </optgroup>
             </select>
           </div>
 
@@ -296,6 +341,15 @@ export function RoomAnalysisSection({
               );
             })}
           </div>
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-line/70 pt-2 text-xs">
+          <span className="num text-mute">
+            {selectedSeason.shortLabel} 기준 태양 궤적: 일출 {formatMinutesToHHMM(solarEvents.sunriseMin)} · 남중{" "}
+            {formatMinutesToHHMM(solarEvents.solarNoonMin)} (최고 고도 {solarEvents.maxAltitudeDeg}°) · 일몰{" "}
+            {formatMinutesToHHMM(solarEvents.sunsetMin)} · 낮 길이 {solarEvents.dayLengthHours.toFixed(1)}시간
+          </span>
+          {locError && <span className="text-warn">{locError}</span>}
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">

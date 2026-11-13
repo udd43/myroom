@@ -33,28 +33,63 @@ export interface LocationPreset {
   label: string;
   lat: number;
   lon: number;
+  region?: "seoul" | "korea";
   keywords: string[];
 }
 
-export const KOREA_LOCATION_PRESETS: LocationPreset[] = [
-  { id: "seoul-gangnam", label: "서울 강남구 역삼동", lat: 37.5007, lon: 127.0365, keywords: ["역삼", "강남", "삼성", "선릉"] },
-  { id: "seoul-mapo", label: "서울 마포구 연남동", lat: 37.5618, lon: 126.9248, keywords: ["연남", "마포", "홍대", "합정", "망원"] },
-  { id: "seoul-seocho", label: "서울 서초구", lat: 37.4837, lon: 127.0324, keywords: ["서초", "방배", "교대"] },
-  { id: "seoul-songpa", label: "서울 송파구 잠실", lat: 37.5145, lon: 127.1059, keywords: ["송파", "잠실", "가락"] },
-  { id: "seoul-seongdong", label: "서울 성동구 성수동", lat: 37.5446, lon: 127.056, keywords: ["성수", "성동", "왕십리", "건대"] },
-  { id: "seoul-yongsan", label: "서울 용산구", lat: 37.5326, lon: 126.9905, keywords: ["용산", "이태원", "한남"] },
-  { id: "seoul-yeongdeungpo", label: "서울 영등포구 여의도", lat: 37.5219, lon: 126.9244, keywords: ["여의도", "영등포", "당산"] },
-  { id: "seoul", label: "서울특별시", lat: 37.5665, lon: 126.978, keywords: ["서울"] },
-  { id: "pangyo", label: "경기 성남시 판교·분당", lat: 37.3948, lon: 127.1112, keywords: ["판교", "분당", "성남"] },
-  { id: "suwon", label: "경기 수원시", lat: 37.2636, lon: 127.0286, keywords: ["수원", "광교"] },
-  { id: "incheon", label: "인천광역시", lat: 37.4563, lon: 126.7052, keywords: ["인천", "송도", "부평"] },
-  { id: "chuncheon", label: "강원 춘천시", lat: 37.8813, lon: 127.7298, keywords: ["춘천", "강원"] },
-  { id: "daejeon", label: "대전·세종", lat: 36.3504, lon: 127.3845, keywords: ["대전", "세종", "유성"] },
-  { id: "daegu", label: "대구광역시", lat: 35.8714, lon: 128.6014, keywords: ["대구", "수성"] },
-  { id: "gwangju", label: "광주광역시", lat: 35.1595, lon: 126.8526, keywords: ["광주", "상무"] },
-  { id: "busan", label: "부산광역시", lat: 35.1796, lon: 129.0756, keywords: ["부산", "해운대", "서면", "수영"] },
-  { id: "jeju", label: "제주시", lat: 33.4996, lon: 126.5312, keywords: ["제주", "서귀포"] },
+export const SEOUL_DISTRICT_PRESETS: LocationPreset[] = [
+  { id: "seoul-gangnam", label: "서울 강남구", lat: 37.5172, lon: 127.0473, region: "seoul", keywords: ["강남", "역삼", "삼성", "선릉", "대치", "논현", "신사", "압구정", "청담", "도곡", "개포", "수서"] },
+  { id: "seoul-seocho", label: "서울 서초구", lat: 37.4837, lon: 127.0324, region: "seoul", keywords: ["서초", "방배", "교대", "반포", "잠원", "양재", "내곡"] },
+  { id: "seoul-songpa", label: "서울 송파구", lat: 37.5145, lon: 127.1059, region: "seoul", keywords: ["송파", "잠실", "석촌", "가락", "문정", "방이", "오금", "풍납", "위례"] },
+  { id: "seoul-gangdong", label: "서울 강동구", lat: 37.5301, lon: 127.1238, region: "seoul", keywords: ["강동", "천호", "길동", "명일", "고덕", "암사", "성내", "둔촌"] },
+  { id: "seoul-mapo", label: "서울 마포구", lat: 37.5663, lon: 126.9019, region: "seoul", keywords: ["마포", "연남", "홍대", "합정", "망원", "상수", "공덕", "아현", "상암", "서교", "동교"] },
+  { id: "seoul-seodaemun", label: "서울 서대문구", lat: 37.5791, lon: 126.9368, region: "seoul", keywords: ["서대문", "신촌", "이대", "연희", "홍제", "북아현", "가좌"] },
+  { id: "seoul-eunpyeong", label: "서울 은평구", lat: 37.6027, lon: 126.9291, region: "seoul", keywords: ["은평", "연신내", "불광", "응암", "녹번", "구파발", "진관"] },
+  { id: "seoul-yongsan", label: "서울 용산구", lat: 37.5326, lon: 126.9905, region: "seoul", keywords: ["용산", "이태원", "한남", "숙대", "삼각지", "이촌", "효창", "후암"] },
+  { id: "seoul-seongdong", label: "서울 성동구", lat: 37.5633, lon: 127.0371, region: "seoul", keywords: ["성동", "성수", "왕십리", "옥수", "금호", "행당", "마장", "응봉"] },
+  { id: "seoul-gwangjin", label: "서울 광진구", lat: 37.5385, lon: 127.0823, region: "seoul", keywords: ["광진", "건대", "구의", "자양", "군자", "화양", "중곡", "아차산"] },
+  { id: "seoul-dongdaemun", label: "서울 동대문구", lat: 37.5744, lon: 127.0396, region: "seoul", keywords: ["동대문구", "청량리", "회기", "외대", "이문", "휘경", "장안", "제기", "답십리"] },
+  { id: "seoul-jungnang", label: "서울 중랑구", lat: 37.6063, lon: 127.0926, region: "seoul", keywords: ["중랑", "상봉", "면목", "망우", "신내", "중화", "먹골"] },
+  { id: "seoul-seongbuk", label: "서울 성북구", lat: 37.5894, lon: 127.0167, region: "seoul", keywords: ["성북", "안암", "성신여대", "길음", "정릉", "보문", "월곡", "석계"] },
+  { id: "seoul-gangbuk", label: "서울 강북구", lat: 37.6396, lon: 127.0257, region: "seoul", keywords: ["강북", "수유", "미아", "우이", "번동"] },
+  { id: "seoul-dobong", label: "서울 도봉구", lat: 37.6688, lon: 127.0471, region: "seoul", keywords: ["도봉", "창동", "쌍문", "방학"] },
+  { id: "seoul-nowon", label: "서울 노원구", lat: 37.6542, lon: 127.0568, region: "seoul", keywords: ["노원", "상계", "중계", "하계", "공릉", "태릉"] },
+  { id: "seoul-jongno", label: "서울 종로구", lat: 37.573, lon: 126.9794, region: "seoul", keywords: ["종로", "혜화", "광화문", "경복궁", "안국", "종각", "대학로", "서촌", "북촌", "삼청", "평창동"] },
+  { id: "seoul-jung", label: "서울 중구", lat: 37.5641, lon: 126.9979, region: "seoul", keywords: ["중구", "명동", "을지로", "충무로", "신당", "약수", "회현", "서울역", "시청"] },
+  { id: "seoul-yeongdeungpo", label: "서울 영등포구", lat: 37.5264, lon: 126.8963, region: "seoul", keywords: ["영등포", "여의도", "당산", "문래", "신길", "대림", "양평동", "선유도"] },
+  { id: "seoul-dongjak", label: "서울 동작구", lat: 37.5124, lon: 126.9393, region: "seoul", keywords: ["동작", "사당", "이수", "노량진", "상도", "흑석", "숭실대", "신대방"] },
+  { id: "seoul-gwanak", label: "서울 관악구", lat: 37.4784, lon: 126.9516, region: "seoul", keywords: ["관악", "신림", "봉천", "서울대입구", "낙성대", "난곡"] },
+  { id: "seoul-yangcheon", label: "서울 양천구", lat: 37.517, lon: 126.8665, region: "seoul", keywords: ["양천", "목동", "신정", "신월", "오목교"] },
+  { id: "seoul-gangseo", label: "서울 강서구", lat: 37.5509, lon: 126.8495, region: "seoul", keywords: ["강서", "마곡", "화곡", "발산", "가양", "등촌", "방화", "까치산", "김포공항"] },
+  { id: "seoul-guro", label: "서울 구로구", lat: 37.4954, lon: 126.8874, region: "seoul", keywords: ["구로", "신도림", "개봉", "오류", "고척", "온수"] },
+  { id: "seoul-geumcheon", label: "서울 금천구", lat: 37.4569, lon: 126.8955, region: "seoul", keywords: ["금천", "가산", "독산", "시흥동"] },
 ];
+
+export const OTHER_KOREA_LOCATION_PRESETS: LocationPreset[] = [
+  { id: "seoul", label: "서울특별시 전체 기준 (시청)", lat: 37.5665, lon: 126.978, region: "seoul", keywords: ["서울"] },
+  { id: "pangyo", label: "경기 성남시 판교·분당", lat: 37.3948, lon: 127.1112, region: "korea", keywords: ["판교", "분당", "성남"] },
+  { id: "suwon", label: "경기 수원시", lat: 37.2636, lon: 127.0286, region: "korea", keywords: ["수원", "광교"] },
+  { id: "incheon", label: "인천광역시", lat: 37.4563, lon: 126.7052, region: "korea", keywords: ["인천", "송도", "부평"] },
+  { id: "chuncheon", label: "강원 춘천시", lat: 37.8813, lon: 127.7298, region: "korea", keywords: ["춘천", "강원"] },
+  { id: "daejeon", label: "대전·세종", lat: 36.3504, lon: 127.3845, region: "korea", keywords: ["대전", "세종", "유성"] },
+  { id: "daegu", label: "대구광역시", lat: 35.8714, lon: 128.6014, region: "korea", keywords: ["대구", "수성"] },
+  { id: "gwangju", label: "광주광역시", lat: 35.1595, lon: 126.8526, region: "korea", keywords: ["광주", "상무"] },
+  { id: "busan", label: "부산광역시", lat: 35.1796, lon: 129.0756, region: "korea", keywords: ["부산", "해운대", "서면", "수영"] },
+  { id: "jeju", label: "제주시", lat: 33.4996, lon: 126.5312, region: "korea", keywords: ["제주", "서귀포"] },
+];
+
+export const KOREA_LOCATION_PRESETS: LocationPreset[] = [
+  ...SEOUL_DISTRICT_PRESETS,
+  ...OTHER_KOREA_LOCATION_PRESETS,
+];
+
+export interface SolarDayEvents {
+  sunriseMin: number;
+  solarNoonMin: number;
+  sunsetMin: number;
+  dayLengthHours: number;
+  maxAltitudeDeg: number;
+}
 
 export interface ResolvedLocation {
   lat: number;
@@ -172,6 +207,43 @@ export function parseDirectionAzimuthDeg(direction?: string | null): number {
 }
 
 /**
+ * 주소/제목 문자열에서 가장 잘 맞는 한국/서울 자치구·지역 프리셋을 찾습니다.
+ */
+export function matchPresetFromText(text: string): LocationPreset | null {
+  const normalized = (text || "").trim();
+  if (!normalized) return null;
+  for (const preset of KOREA_LOCATION_PRESETS) {
+    if (preset.keywords.some((kw) => normalized.includes(kw))) {
+      return preset;
+    }
+  }
+  return null;
+}
+
+/**
+ * 위·경도에서 가장 가까운 서울 자치구 또는 지역 프리셋을 찾습니다 (기본 maxKm=15km).
+ */
+export function findNearestPresetForCoords(
+  lat: number,
+  lon: number,
+  maxKm = 15
+): LocationPreset | null {
+  let best: LocationPreset | null = null;
+  let bestKm = maxKm;
+  for (const preset of KOREA_LOCATION_PRESETS) {
+    if (preset.id === "seoul") continue;
+    const dLat = (preset.lat - lat) * 111.0;
+    const dLon = (preset.lon - lon) * 111.0 * Math.cos((lat * Math.PI) / 180);
+    const dist = Math.hypot(dLat, dLon);
+    if (dist < bestKm) {
+      bestKm = dist;
+      best = preset;
+    }
+  }
+  return best;
+}
+
+/**
  * 매물 주소 / 저장된 GPS 좌표 기반으로 위도·경도를 결정합니다.
  */
 export function resolveRoomLocation(room: RoomItem): ResolvedLocation {
@@ -189,14 +261,12 @@ export function resolveRoomLocation(room: RoomItem): ResolvedLocation {
     };
   }
 
-  const text = `${room.address || ""} ${room.title || ""}`;
-  for (const preset of KOREA_LOCATION_PRESETS) {
-    if (preset.keywords.some((kw) => text.includes(kw))) {
-      return { lat: preset.lat, lon: preset.lon, label: preset.label, source: "address" };
-    }
+  const matched = matchPresetFromText(`${room.address || ""} ${room.title || ""}`);
+  if (matched) {
+    return { lat: matched.lat, lon: matched.lon, label: matched.label, source: "address" };
   }
 
-  return { lat: 37.5665, lon: 126.978, label: "서울 (기본 기준)", source: "default" };
+  return { lat: 37.5665, lon: 126.978, label: "서울특별시 기준", source: "default" };
 }
 
 /**
@@ -271,6 +341,48 @@ export function calculateSolarPosition(
     altitudeDeg,
     azimuthDeg,
     isDaylight: altitudeDeg > 0.5,
+  };
+}
+
+/**
+ * 지정된 위·경도 및 날짜의 일출·남중(최고 고도)·일몰 시각과 낮 길이를 계산합니다.
+ */
+export function computeSolarDayEvents(
+  dayOfYear: number,
+  latDeg: number,
+  lonDeg: number,
+  tzOffsetMinutes = 540
+): SolarDayEvents {
+  let sunriseMin = 7 * 60;
+  let sunsetMin = 17 * 60 + 30;
+  let solarNoonMin = 12 * 60 + 30;
+  let maxAltitudeDeg = -90;
+  let foundSunrise = false;
+  let prevAlt = -90;
+
+  for (let min = 4 * 60; min <= 21 * 60; min += 4) {
+    const { altitudeDeg } = calculateSolarPosition(dayOfYear, min, latDeg, lonDeg, tzOffsetMinutes);
+    if (!foundSunrise && prevAlt <= 0 && altitudeDeg > 0) {
+      sunriseMin = min - 2;
+      foundSunrise = true;
+    }
+    if (foundSunrise && prevAlt > 0 && altitudeDeg <= 0) {
+      sunsetMin = min - 2;
+      break;
+    }
+    if (altitudeDeg > maxAltitudeDeg) {
+      maxAltitudeDeg = altitudeDeg;
+      solarNoonMin = min;
+    }
+    prevAlt = altitudeDeg;
+  }
+
+  return {
+    sunriseMin,
+    solarNoonMin,
+    sunsetMin,
+    dayLengthHours: Math.max(0, Math.round(((sunsetMin - sunriseMin) / 60) * 10) / 10),
+    maxAltitudeDeg: Math.round(maxAltitudeDeg),
   };
 }
 

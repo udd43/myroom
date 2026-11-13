@@ -1281,9 +1281,10 @@ export default function VolumetricRoomViewer({
                 type="button"
                 onClick={() => toggleTool("sun")}
                 className="hover:text-amber-300"
-                title="채광 설정 열기"
+                title="위치·방위 기반 채광 설정 열기"
               >
-                {room.direction || "남향"} · {sunState.isDirectSunlight ? "직사광" : "간접광"}
+                {sunState.location.label} · {room.direction || "남향"} ·{" "}
+                {sunState.isDirectSunlight ? "직사광" : "간접광"}
               </button>
             </>
           )}

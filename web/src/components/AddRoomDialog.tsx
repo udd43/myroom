@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState } from "react";
-import { LocateFixed, X } from "lucide-react";
+import React, { useMemo, useState } from "react";
+import { LocateFixed, Search, X } from "lucide-react";
 import { NewRoomMeta, Quality, UploadKind } from "@/types/room";
 import { CHECKLIST, DEFAULT_CHECKLIST, GRADES } from "@/lib/checklist";
-import { DIRECTION_OPTIONS } from "@/lib/sunlight";
+import { DIRECTION_OPTIONS, matchPresetFromText, SEOUL_DISTRICT_PRESETS } from "@/lib/sunlight";
+import { requestBrowserGpsLocation, resolveAddressToCoords } from "@/lib/locationClient";
 
 interface Props {
   onClose: () => void;
@@ -53,28 +54,49 @@ export default function AddRoomDialog({ onClose, onSubmit }: Props) {
   const [quality, setQuality] = useState<Quality>("high");
   const [busy, setBusy] = useState(false);
   const [locating, setLocating] = useState(false);
+  const [geocoding, setGeocoding] = useState(false);
+  const [geoNotice, setGeoNotice] = useState<string | null>(null);
 
   const set = <K extends keyof NewRoomMeta>(k: K, v: NewRoomMeta[K]) => setForm((f) => ({ ...f, [k]: v }));
   const kind = kindOf(file);
+  const inferredLocation = useMemo(
+    () => matchPresetFromText(`${form.address} ${form.title}`),
+    [form.address, form.title]
+  );
 
-  const requestGps = () => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) return;
+  const requestGps = async () => {
     setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const lat = +pos.coords.latitude.toFixed(4);
-        const lon = +pos.coords.longitude.toFixed(4);
-        setForm((f) => ({
-          ...f,
-          latitude: lat,
-          longitude: lon,
-          locationLabel: f.address.trim() || `현재 GPS (${lat.toFixed(2)}°N, ${lon.toFixed(2)}°E)`,
-        }));
-        setLocating(false);
-      },
-      () => setLocating(false),
-      { enableHighAccuracy: true, timeout: 6000 }
-    );
+    setGeoNotice(null);
+    const res = await requestBrowserGpsLocation();
+    setLocating(false);
+    if (res.ok) {
+      setForm((f) => ({
+        ...f,
+        latitude: res.latitude,
+        longitude: res.longitude,
+        locationLabel: res.locationLabel,
+      }));
+    } else {
+      setGeoNotice(res.message);
+    }
+  };
+
+  const lookupAddressCoords = async () => {
+    if (!form.address.trim()) return;
+    setGeocoding(true);
+    setGeoNotice(null);
+    const hit = await resolveAddressToCoords(form.address);
+    setGeocoding(false);
+    if (hit) {
+      setForm((f) => ({
+        ...f,
+        latitude: hit.latitude,
+        longitude: hit.longitude,
+        locationLabel: hit.locationLabel,
+      }));
+    } else {
+      setGeoNotice("주소를 찾지 못했습니다. 서울 자치구 목록에서 직접 선택해 주세요.");
+    }
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -153,15 +175,20 @@ export default function AddRoomDialog({ onClose, onSubmit }: Props) {
                 placeholder="합정역 5분 남향 투룸"
               />
             </div>
-            <div className="col-span-2 sm:col-span-4">
-              <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                <label className="label mb-0">주소 (채광 위·경도 기준)</label>
-                <div className="flex items-center gap-2">
-                  {typeof form.latitude === "number" && typeof form.longitude === "number" && (
-                    <span className="num text-[11px] font-medium text-ok">
-                      GPS {form.latitude.toFixed(3)}°N, {form.longitude.toFixed(3)}°E
-                    </span>
-                  )}
+            <div className="col-span-2 sm:col-span-4 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="label mb-0">주소 · 위치 기준 (서울 구/동 · GPS)</label>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={lookupAddressCoords}
+                    disabled={geocoding || !form.address.trim()}
+                    className="btn-line py-0.5 text-xs disabled:opacity-50"
+                    title="입력한 주소에서 위·경도 자동 조회"
+                  >
+                    <Search className="h-3 w-3" />
+                    <span>{geocoding ? "검색 중…" : "주소 좌표 찾기"}</span>
+                  </button>
                   <button
                     type="button"
                     onClick={requestGps}
@@ -169,16 +196,59 @@ export default function AddRoomDialog({ onClose, onSubmit }: Props) {
                     className="btn-line py-0.5 text-xs"
                   >
                     <LocateFixed className="h-3 w-3" />
-                    <span>{locating ? "측정 중…" : "현재 GPS 위치 자동 입력"}</span>
+                    <span>{locating ? "측정 중…" : "현재 GPS 위치"}</span>
                   </button>
                 </div>
               </div>
-              <input
-                className="input"
-                value={form.address}
-                onChange={(e) => set("address", e.target.value)}
-                placeholder="서울 강남구 역삼동 …"
-              />
+              <div className="flex flex-wrap gap-2">
+                <input
+                  className="input min-w-[200px] flex-1"
+                  value={form.address}
+                  onChange={(e) => set("address", e.target.value)}
+                  placeholder="서울 마포구 연남동 / 강남구 역삼동 / 노원구 …"
+                />
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const p = SEOUL_DISTRICT_PRESETS.find((x) => x.id === e.target.value);
+                    if (p) {
+                      setGeoNotice(null);
+                      setForm((f) => ({
+                        ...f,
+                        address: f.address.trim() || p.label,
+                        latitude: p.lat,
+                        longitude: p.lon,
+                        locationLabel: p.label,
+                      }));
+                    }
+                  }}
+                  className="input w-auto text-xs"
+                  aria-label="서울 자치구 빠른 선택"
+                >
+                  <option value="">서울 자치구 선택…</option>
+                  {SEOUL_DISTRICT_PRESETS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {typeof form.latitude === "number" && typeof form.longitude === "number" ? (
+                <p className="num text-xs font-medium text-ok">
+                  지정된 좌표: {form.locationLabel || "사용자 지정"} ({form.latitude.toFixed(4)}°N,{" "}
+                  {form.longitude.toFixed(4)}°E)
+                </p>
+              ) : inferredLocation ? (
+                <p className="num text-xs text-mute">
+                  주소 자동 매핑: {inferredLocation.label} ({inferredLocation.lat.toFixed(3)}°N,{" "}
+                  {inferredLocation.lon.toFixed(3)}°E)
+                </p>
+              ) : (
+                <p className="text-xs text-mute">
+                  미입력 시 기본 서울 기준(37.5665°N, 126.9780°E)으로 일조가 계산됩니다.
+                </p>
+              )}
+              {geoNotice && <p className="text-xs text-warn">{geoNotice}</p>}
             </div>
             {NUMBER_FIELDS.map(({ key, label }) => (
               <div key={key}>

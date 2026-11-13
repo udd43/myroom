@@ -1,16 +1,20 @@
 "use client";
 
-import React, { useMemo, useRef } from "react";
-import { Download, Pause, Play, Sun } from "lucide-react";
+import React, { useMemo, useRef, useState } from "react";
+import { Download, LocateFixed, Pause, Play, Sun } from "lucide-react";
 import { RoomItem, RoomPlanData } from "@/types/room";
 import {
   analyzeDailySunlight,
   computeWindowFloorSunPolygons,
   DIRECTION_OPTIONS,
   formatMinutesToHHMM,
+  KOREA_LOCATION_PRESETS,
+  OTHER_KOREA_LOCATION_PRESETS,
   SEASON_PRESETS,
   SeasonPresetId,
+  SEOUL_DISTRICT_PRESETS,
 } from "@/lib/sunlight";
+import { requestBrowserGpsLocation } from "@/lib/locationClient";
 import { useSunlightState } from "@/hooks/useSunlightState";
 
 interface Props {
@@ -38,9 +42,23 @@ const FALLBACK_PLAN: RoomPlanData = {
 
 export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const [locating, setLocating] = useState(false);
   const plan = room.roomPlan || FALLBACK_PLAN;
   const furnitures = room.furnitures || [];
   const { params, dayOfYear, sunState, playing, togglePlay, updateParams } = useSunlightState(room, true);
+
+  const requestGps = async () => {
+    setLocating(true);
+    const res = await requestBrowserGpsLocation();
+    setLocating(false);
+    if (res.ok) {
+      onUpdateRoom?.({
+        latitude: res.latitude,
+        longitude: res.longitude,
+        locationLabel: res.locationLabel,
+      });
+    }
+  };
   const daily = useMemo(
     () => analyzeDailySunlight(room, dayOfYear, params.considerObstruction),
     [room, dayOfYear, params.considerObstruction]
@@ -152,6 +170,51 @@ export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
             </option>
           ))}
         </select>
+
+        <select
+          value=""
+          onChange={(e) => {
+            const p = KOREA_LOCATION_PRESETS.find((x) => x.id === e.target.value);
+            if (p) {
+              onUpdateRoom?.({
+                latitude: p.lat,
+                longitude: p.lon,
+                locationLabel: p.label,
+              });
+            }
+          }}
+          className="input max-w-[165px] py-1 text-xs"
+          aria-label="2D 도면 위치 선택"
+        >
+          <option value="">
+            {sunState.location.label} ({sunState.location.lat.toFixed(2)}°N)
+          </option>
+          <optgroup label="서울특별시 25개 자치구">
+            {SEOUL_DISTRICT_PRESETS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </optgroup>
+          <optgroup label="전국 주요 지역">
+            {OTHER_KOREA_LOCATION_PRESETS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </optgroup>
+        </select>
+
+        <button
+          type="button"
+          onClick={requestGps}
+          disabled={locating}
+          className="btn-line py-1 text-xs"
+          title="현재 GPS 위치 기반 서울 좌표 적용"
+        >
+          <LocateFixed className="h-3 w-3" />
+          <span>{locating ? "측정" : "GPS"}</span>
+        </button>
 
         <label className="flex cursor-pointer items-center gap-1 text-ink">
           <input
