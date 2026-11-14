@@ -204,7 +204,8 @@ def geocode_kakao(query: str) -> dict[str, Any]:
             "ji": sub_no.zfill(4) if sub_no.isdigit() else "0000",
             "candidates": [
                 {
-                    "name": d.get("address_name") or d.get("place_name"),
+                    "name": d.get("place_name") or d.get("road_address_name") or d.get("address_name"),
+                    "address": d.get("road_address_name") or d.get("address_name") or "",
                     "latitude": float(d["y"]),
                     "longitude": float(d["x"]),
                 }

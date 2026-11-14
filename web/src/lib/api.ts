@@ -273,6 +273,12 @@ export const api = {
       bjdongCd?: string;
       bun?: string;
       ji?: string;
+      candidates?: Array<{
+        name?: string;
+        address?: string;
+        latitude: number;
+        longitude: number;
+      }>;
     }>(`${base}/api/integrations/geocode?q=${encodeURIComponent(q)}`);
   },
 

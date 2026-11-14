@@ -9,7 +9,8 @@ import { CHECKLIST, GRADES, checklistScore } from "@/lib/checklist";
 import { effectiveMonthlyCost, man, monthlyTotal, priceLine, sqm } from "@/lib/format";
 import { api } from "@/lib/api";
 import { analyzeDailySunlight, getCurrentDayOfYear, resolveRoomLocation } from "@/lib/sunlight";
-import { useAppStore, WORKPLACE_PRESETS } from "@/store/useAppStore";
+import { useAppStore } from "@/store/useAppStore";
+import CommuteDestPicker from "./CommuteDestPicker";
 
 interface Props {
   rooms: RoomItem[];
@@ -114,7 +115,6 @@ export default function RoomCompareView({ rooms, apiBaseUrl }: Props) {
   const loanRatePct = useAppStore((s) => s.loanRatePct);
   const setLoanRatePct = useAppStore((s) => s.setLoanRatePct);
   const commuteDest = useAppStore((s) => s.commuteDest);
-  const setCommuteDest = useAppStore((s) => s.setCommuteDest);
 
   useEffect(() => {
     let cancelled = false;
@@ -248,21 +248,12 @@ export default function RoomCompareView({ rooms, apiBaseUrl }: Props) {
               <span>%</span>
             </label>
 
-            <select
-              value={commuteDest.label}
-              onChange={(e) => {
-                const picked = WORKPLACE_PRESETS.find((p) => p.label === e.target.value);
-                if (picked) setCommuteDest(picked);
-              }}
-              className="input w-auto py-1 text-xs"
-              aria-label="직장 또는 학교 목적지 선택"
-            >
-              {WORKPLACE_PRESETS.map((p) => (
-                <option key={p.label} value={p.label}>
-                  출퇴근: {p.label}
-                </option>
-              ))}
-            </select>
+            <CommuteDestPicker
+              apiBase={apiBaseUrl}
+              serverOnline={Boolean(apiBaseUrl)}
+              prefix="출퇴근: "
+              align="left"
+            />
 
             <div className="flex flex-wrap gap-1">
               {(Object.keys(WEIGHT_CONFIG) as WeightPreset[]).map((k) => (

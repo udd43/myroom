@@ -15,8 +15,9 @@ import {
 import { api } from "@/lib/api";
 import { man } from "@/lib/format";
 import { resolveRoomLocation } from "@/lib/sunlight";
-import { useAppStore, WORKPLACE_PRESETS } from "@/store/useAppStore";
+import { CommuteDestination, useAppStore } from "@/store/useAppStore";
 import { NeighborBuilding, PropertyIntel, RoomItem } from "@/types/room";
+import CommuteDestPicker from "./CommuteDestPicker";
 
 interface Props {
   room: RoomItem;
@@ -47,9 +48,9 @@ export default function PropertyIntelPanel({
 }: Props) {
   const loanRatePct = useAppStore((s) => s.loanRatePct);
   const commuteDest = useAppStore((s) => s.commuteDest);
-  const setCommuteDest = useAppStore((s) => s.setCommuteDest);
 
   const [loadingIntel, setLoadingIntel] = useState(false);
+  const [loadingCommute, setLoadingCommute] = useState(false);
   const [loadingVworld, setLoadingVworld] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
@@ -204,6 +205,35 @@ export default function PropertyIntelPanel({
     onUpdateRoom({ neighborBuildings: neighbors.filter((b) => b.id !== id) });
   };
 
+  const refreshCommuteOnly = async (dest: CommuteDestination) => {
+    if (!serverOnline || !apiBase || !onUpdateRoom) return;
+    setLoadingCommute(true);
+    setStatusMsg(null);
+    try {
+      const lat = room.latitude ?? resolvedLoc.lat;
+      const lng = room.longitude ?? resolvedLoc.lon;
+      const commute = await api.getCommute(apiBase, {
+        originLat: lat,
+        originLng: lng,
+        destLat: dest.latitude,
+        destLng: dest.longitude,
+        destLabel: dest.label,
+      });
+      onUpdateRoom({
+        propertyIntel: {
+          ...(room.propertyIntel ?? {}),
+          commute,
+          fetchedAt: room.propertyIntel?.fetchedAt ?? new Date().toISOString(),
+        },
+      });
+      setStatusMsg(`출퇴근 목적지를 '${dest.label}' 기준으로 다시 계산했습니다.`);
+    } catch {
+      setStatusMsg(`'${dest.label}' 기준 출퇴근 경로를 불러오지 못했습니다. 상단 버튼으로 전체 재조회를 시도해 주세요.`);
+    } finally {
+      setLoadingCommute(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2">
@@ -217,21 +247,14 @@ export default function PropertyIntelPanel({
 
         {!readOnly && (
           <div className="flex flex-wrap items-center gap-1.5">
-            <select
-              value={commuteDest.label}
-              onChange={(e) => {
-                const picked = WORKPLACE_PRESETS.find((p) => p.label === e.target.value);
-                if (picked) setCommuteDest(picked);
-              }}
-              className="input w-auto py-1 text-xs"
-              title="출퇴근 기준 목적지"
-            >
-              {WORKPLACE_PRESETS.map((p) => (
-                <option key={p.label} value={p.label}>
-                  목적지: {p.label}
-                </option>
-              ))}
-            </select>
+            <CommuteDestPicker
+              apiBase={apiBase}
+              serverOnline={serverOnline}
+              prefix="목적지: "
+              align="right"
+              busy={loadingCommute}
+              onSelectDest={(dest) => void refreshCommuteOnly(dest)}
+            />
             <button
               type="button"
               onClick={fetchAllIntel}
