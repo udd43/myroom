@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Callable
 
-from pipeline import generate_sample_room_1, generate_sample_room_2
+from pipeline import convert_splat_to_spz, generate_sample_room_1, generate_sample_room_2
 
 from .config import STORAGE_DIR, storage_url
 
@@ -207,14 +207,67 @@ def _build_sample(spec: dict[str, Any], storage_dir: Path) -> Room:
     room_dir = storage_dir / room_id
     room_dir.mkdir(parents=True, exist_ok=True)
     generate: Callable[[Path, Path], int] = spec["generator"]
-    splat_count = generate(room_dir / "scene.splat", room_dir / "scene.ply")
+    splat_path = room_dir / "scene.splat"
+    splat_count = generate(splat_path, room_dir / "scene.ply")
+    spz_url = None
+    try:
+        convert_splat_to_spz(splat_path, room_dir / "scene.spz")
+        spz_url = storage_url(room_id, "scene.spz")
+    except Exception:
+        spz_url = None
+
+    sample_neighbors = meta.get("neighborBuildings")
+    if sample_neighbors is None:
+        if room_id == "sample-yeoksam-2room":
+            sample_neighbors = [
+                {
+                    "id": "nb-south-villa",
+                    "name": "남측 앞 건물 (예시 · 4층 빌라)",
+                    "xM": -2.5,
+                    "zM": 13.5,
+                    "widthM": 12.0,
+                    "depthM": 9.0,
+                    "heightM": 13.5,
+                    "floors": 4,
+                    "distanceM": 13.7,
+                    "source": "manual",
+                },
+                {
+                    "id": "nb-southwest-apt",
+                    "name": "남서측 인접 건물 (예시 · 5층)",
+                    "xM": -14.0,
+                    "zM": 11.0,
+                    "widthM": 10.0,
+                    "depthM": 11.0,
+                    "heightM": 16.5,
+                    "floors": 5,
+                    "distanceM": 17.8,
+                    "source": "manual",
+                },
+            ]
+        else:
+            sample_neighbors = []
 
     return {
         **meta,
+        "neighborBuildings": sample_neighbors,
+        "timeline": meta.get(
+            "timeline",
+            [
+                {
+                    "id": f"{room_id}-tl-1",
+                    "stage": "viewing",
+                    "title": "초기 임장 · 3D 스캔 및 채광 측정",
+                    "note": "창문 방위 확인 및 가구 배치 시뮬레이션 완료",
+                    "createdAt": spec["createdAt"],
+                }
+            ],
+        ),
         "status": "ready",
         "progress": 100,
         "stageText": f"샘플 데모 방 ({splat_count:,} splats)",
         "splatUrl": storage_url(room_id, "scene.splat"),
+        "spzUrl": spz_url,
         "plyUrl": storage_url(room_id, "scene.ply"),
         "videoUrl": None,
         "thumbUrl": None,

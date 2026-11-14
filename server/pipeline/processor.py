@@ -10,6 +10,7 @@ from .splat_converter import (
     write_splat_file,
     write_ply_file,
     convert_ply_to_splat,
+    convert_splat_to_spz,
     read_colmap_points3d_bin,
 )
 from .dust3r_engine import is_dust3r_available, reconstruct_with_dust3r
@@ -370,12 +371,18 @@ def process_video_to_3d(
                     )
                     if trained is not None:
                         splat_count, used_engine = trained
+                        spz_path = output_splat_path.with_suffix(".spz")
+                        try:
+                            convert_splat_to_spz(output_splat_path, spz_path)
+                        except Exception:
+                            spz_path = None
                         if on_progress:
                             on_progress(100, f"정밀 3D 가우시안 스플래팅 완료 ({splat_count:,} splats)")
                         return {
                             "splat_count": splat_count,
                             "frame_count": len(frame_paths),
                             "engine": used_engine,
+                            "spz_generated": bool(spz_path and spz_path.exists()),
                         }
         except Exception as e:
             if on_progress:
@@ -397,6 +404,12 @@ def process_video_to_3d(
         on_progress=on_progress,
     )
 
+    spz_path = output_splat_path.with_suffix(".spz")
+    try:
+        convert_splat_to_spz(output_splat_path, spz_path)
+    except Exception:
+        spz_path = None
+
     if on_progress:
         on_progress(100, f"3D 볼류메트릭 공간 생성 완료 ({splat_count:,} splats)")
 
@@ -404,5 +417,6 @@ def process_video_to_3d(
         "splat_count": splat_count,
         "frame_count": len(frame_paths),
         "engine": used_engine,
+        "spz_generated": bool(spz_path and spz_path.exists()),
     }
 

@@ -190,6 +190,54 @@ export function updateSunOverlayGroup(
     group.add(halo);
   }
 
+  // 3b. 주변 건물 3D 컨텍스트 블록 렌더링 (그림자 차폐 시각화)
+  const neighbors = room.neighborBuildings || [];
+  if (neighbors.length > 0 && opts.enabled) {
+    const deltaRad = (deltaDeg * Math.PI) / 180;
+    const cosD = Math.cos(deltaRad);
+    const sinD = Math.sin(deltaRad);
+    for (const nb of neighbors.slice(0, 16)) {
+      // 실제 거리가 멀 경우(예: 25m) 3D Orbit 창 안에서 보이도록 합리적 축소(6~14m)하여 배치
+      const rawDist = Math.hypot(nb.xM, nb.zM) || 1;
+      const visualDist = Math.min(13.5, Math.max(radius + 1.8, rawDist * 0.55));
+      const scaleDist = visualDist / rawDist;
+      const wx = nb.xM * scaleDist;
+      const wz = nb.zM * scaleDist;
+      // world compass -> 3D room scene rotation (+deltaDeg clockwise from -Z toward +X)
+      const rx = wx * cosD - wz * sinD;
+      const rz = wx * sinD + wz * cosD;
+
+      const bw = Math.min(6.5, Math.max(2.0, nb.widthM * 0.45));
+      const bd = Math.min(6.5, Math.max(2.0, nb.depthM * 0.45));
+      const relH = Math.max(1.8, Math.min(8.5, (nb.heightM - sunState.roomElevationM + 3.0) * 0.42));
+      const isBlocking = sunState.blockedByBuilding?.id === nb.id;
+
+      const boxGeo = new THREE.BoxGeometry(bw, relH, bd);
+      const boxMat = new THREE.MeshBasicMaterial({
+        color: isBlocking ? "#dc2626" : "#475569",
+        transparent: true,
+        opacity: isBlocking ? 0.34 : 0.18,
+        depthWrite: false,
+      });
+      const boxMesh = new THREE.Mesh(boxGeo, boxMat);
+      boxMesh.position.set(rx, floorY + relH / 2, rz);
+      boxMesh.rotation.y = -deltaRad;
+      group.add(boxMesh);
+
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(boxGeo),
+        new THREE.LineBasicMaterial({
+          color: isBlocking ? "#f87171" : "#94a3b8",
+          transparent: true,
+          opacity: isBlocking ? 0.9 : 0.5,
+        })
+      );
+      edges.position.copy(boxMesh.position);
+      edges.rotation.copy(boxMesh.rotation);
+      group.add(edges);
+    }
+  }
+
   // 4. 창문 바닥 투영 채광 패치 & 반투명 볼류메트릭 빛 기둥 (직사광 유입 시)
   if (!sunState.isDirectSunlight) return;
 

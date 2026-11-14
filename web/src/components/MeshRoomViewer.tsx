@@ -1,38 +1,80 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { USDLoader } from "three/examples/jsm/loaders/USDLoader.js";
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
 import { Box, MapPin, Ruler, Sun } from "lucide-react";
 import { FurnitureItem, RoomItem, RoomPin } from "@/types/room";
-import { disposeGroupChildren, updateSunOverlayGroup } from "@/lib/sunScene3d";
 import { useSunlightState } from "@/hooks/useSunlightState";
+import { resolveMediaUrl } from "@/lib/api";
+import { analyzeLayoutConflicts, snapFurniturePose } from "@/lib/floorplanCollision";
+import { disposeGroupChildren, updateSunOverlayGroup } from "@/lib/sunScene3d";
 import { MeasureBanner, PinLabels, PinPrompt, ViewerLoading } from "./ViewerOverlays";
 import { FurniturePaletteBar, buildFurnitureGroup } from "./FurnitureControls";
 import SunlightControlBar from "./SunlightControlBar";
+import { SyncedOrbitState } from "./VolumetricRoomViewer";
+import { useAppStore } from "@/store/useAppStore";
+
+type Mode = "none" | "measure" | "pin" | "furniture" | "sun";
 
 interface Props {
   room: RoomItem;
   apiBaseUrl: string;
+  compact?: boolean;
+  readOnly?: boolean;
+  syncedCamera?: SyncedOrbitState | null;
+  onCameraSyncChange?: (state: SyncedOrbitState) => void;
   onAddPin?: (pin: Omit<RoomPin, "id">) => void;
   onUpdateFurnitures?: (items: FurnitureItem[]) => void;
   onUpdateRoom?: (patch: Partial<RoomItem>) => void;
 }
 
-type Mode = "none" | "measure" | "pin" | "furniture" | "sun";
-type Projected = Array<{ pin: RoomPin; x: number; y: number; visible: boolean }>;
+// Install BVH accelerated raycast cleanly on Three prototypes once
+let bvhPatched = false;
+function ensureBvhPatched() {
+  if (bvhPatched) return;
+  bvhPatched = true;
+  THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+  THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+  THREE.Mesh.prototype.raycast = acceleratedRaycast;
+}
 
-/** LiDAR 스캔(GLB) 뷰어 + TransformControls 3D 가구 배치 */
 export default function MeshRoomViewer({
   room,
   apiBaseUrl,
+  compact = false,
+  readOnly = false,
+  syncedCamera = null,
+  onCameraSyncChange,
   onAddPin,
   onUpdateFurnitures,
   onUpdateRoom,
 }: Props) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [mode, setMode] = useState<Mode>("none");
+  const [clipY, setClipY] = useState(10);
+  const [bounds, setBounds] = useState<{ min: number; max: number } | null>(null);
+  const [measure, setMeasure] = useState<THREE.Vector3[]>([]);
+  const [pending, setPending] = useState<[number, number, number] | null>(null);
+  const [projected, setProjected] = useState<Array<{ pin: RoomPin; x: number; y: number; visible: boolean }>>([]);
+  const [furnitures, setFurnitures] = useState<FurnitureItem[]>(room.furnitures || []);
+  const [selectedFurnId, setSelectedFurnId] = useState<string | null>(null);
+  const [gizmoMode, setGizmoMode] = useState<"translate" | "rotate">("translate");
+
+  const snapAngleDeg = useAppStore((s) => s.snapAngleDeg);
+  const snapToWalls = useAppStore((s) => s.snapToWalls);
+  const snapAngleRef = useRef(snapAngleDeg);
+  const snapWallsRef = useRef(snapToWalls);
+  snapAngleRef.current = snapAngleDeg;
+  snapWallsRef.current = snapToWalls;
+
+  const { params, dayOfYear, sunState, playing, togglePlay, updateParams } = useSunlightState(room, true);
+
   const sceneRef = useRef<{
     clip: THREE.Plane;
     markers: THREE.Group;
@@ -41,23 +83,10 @@ export default function MeshRoomViewer({
     ambLight: THREE.AmbientLight;
     dirLight: THREE.DirectionalLight;
     sunOverlayGroup: THREE.Group;
+    floorY: number;
   } | null>(null);
-  const meshMapRef = useRef<Map<string, THREE.Mesh>>(new Map());
-  const { params, dayOfYear, sunState, playing, togglePlay, updateParams } = useSunlightState(room, true);
-
-  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [bounds, setBounds] = useState<{ min: number; max: number } | null>(null);
-  const [clipY, setClipY] = useState(100);
-  const [mode, setMode] = useState<Mode>("none");
-  const [measure, setMeasure] = useState<THREE.Vector3[]>([]);
-  const [pending, setPending] = useState<[number, number, number] | null>(null);
-  const [projected, setProjected] = useState<Projected>([]);
-
-  const [furnitures, setFurnitures] = useState<FurnitureItem[]>(room.furnitures || []);
-  const [selectedFurnId, setSelectedFurnId] = useState<string | null>(null);
-  const [gizmoMode, setGizmoMode] = useState<"translate" | "rotate">("translate");
-
-  const modeRef = useRef(mode);
+  const meshMapRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  const modeRef = useRef<Mode>(mode);
   const pinsRef = useRef(room.pins);
   const furnRef = useRef(furnitures);
   modeRef.current = mode;
@@ -68,10 +97,27 @@ export default function MeshRoomViewer({
     setFurnitures(room.furnitures || []);
   }, [room.id, room.furnitures]);
 
+  const conflicts = useMemo(
+    () => (room.roomPlan ? analyzeLayoutConflicts(furnitures, room.roomPlan) : []),
+    [furnitures, room.roomPlan]
+  );
+  const conflictIds = useMemo(
+    () => new Set(conflicts.flatMap((c) => c.furnitureIds)),
+    [conflicts]
+  );
+
+  // Choose GLB first or direct browser-rendered USDZ (iPhone RoomPlan!)
+  const activeMeshUrl = useMemo(() => {
+    const raw = room.modelUrl || room.usdzUrl || "";
+    return resolveMediaUrl(apiBaseUrl, raw) || "";
+  }, [apiBaseUrl, room.modelUrl, room.usdzUrl]);
+
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || !room.modelUrl) return;
+    if (!container || !activeMeshUrl) return;
+    ensureBvhPatched();
     let disposed = false;
+    setStatus("loading");
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#111318");
@@ -83,7 +129,7 @@ export default function MeshRoomViewer({
     const sunOverlayGroup = new THREE.Group();
     scene.add(sunOverlayGroup);
 
-    const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 200);
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 250);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.localClippingEnabled = true;
@@ -97,35 +143,45 @@ export default function MeshRoomViewer({
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    if (syncedCamera) {
+      controls.target.set(...syncedCamera.target);
+    }
 
     const tc = new TransformControls(camera, renderer.domElement);
     tc.addEventListener("dragging-changed", (ev) => {
       controls.enabled = !ev.value;
-      if (!ev.value && tc.object) {
+      if (!ev.value && tc.object && sceneRef.current) {
         const fid = tc.object.userData.furnitureId as string | undefined;
         if (fid) {
-          const pos = tc.object.position;
-          const rotY = tc.object.rotation.y;
-          const next = furnRef.current.map((f) =>
-            f.id === fid
-              ? {
-                  ...f,
-                  position: [+pos.x.toFixed(2), +pos.y.toFixed(2), +pos.z.toFixed(2)] as [
-                    number,
-                    number,
-                    number,
-                  ],
-                  rotationY: +rotY.toFixed(3),
-                }
-              : f
-          );
-          setFurnitures(next);
-          onUpdateFurnitures?.(next);
+          const curItem = furnRef.current.find((f) => f.id === fid);
+          if (curItem) {
+            const snapped = snapFurniturePose(
+              curItem,
+              tc.object.position.x,
+              tc.object.position.y,
+              tc.object.position.z,
+              tc.object.rotation.y,
+              {
+                floorY: sceneRef.current.floorY,
+                plan: room.roomPlan,
+                snapAngleDeg: snapAngleRef.current || 1,
+                snapToFloor: true,
+                snapToWalls: snapWallsRef.current,
+              }
+            );
+            tc.object.position.set(...snapped.position);
+            tc.object.rotation.y = snapped.rotationY;
+            const next = furnRef.current.map((f) =>
+              f.id === fid ? { ...f, ...snapped } : f
+            );
+            setFurnitures(next);
+            onUpdateFurnitures?.(next);
+          }
         }
       }
     });
     scene.add(tc.getHelper());
-    sceneRef.current = { clip, markers, furnitureGroup, tc, ambLight, dirLight, sunOverlayGroup };
+    sceneRef.current = { clip, markers, furnitureGroup, tc, ambLight, dirLight, sunOverlayGroup, floorY: -1.25 };
 
     const resize = () => {
       const w = container.clientWidth || 800;
@@ -138,35 +194,61 @@ export default function MeshRoomViewer({
     window.addEventListener("resize", resize);
 
     let root: THREE.Object3D | null = null;
-    const url = room.modelUrl.startsWith("http") ? room.modelUrl : `${apiBaseUrl}${room.modelUrl}`;
-    new GLTFLoader().load(
-      url,
-      (gltf) => {
-        if (disposed) return;
-        root = gltf.scene;
-        root.traverse((o) => {
-          const mesh = o as THREE.Mesh;
-          if (!mesh.isMesh) return;
-          for (const mat of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
-            mat.side = THREE.DoubleSide;
-            mat.clippingPlanes = [clip];
-          }
-        });
-        scene.add(root);
-        const box = new THREE.Box3().setFromObject(root);
-        const c = box.getCenter(new THREE.Vector3());
-        const r = Math.max(...box.getSize(new THREE.Vector3()).toArray());
-        controls.target.copy(c);
-        camera.position.set(c.x + r * 0.7, box.max.y + r * 0.6, c.z + r * 0.9);
-        setBounds({ min: box.min.y, max: box.max.y });
-        setClipY(box.max.y + 1);
-        setStatus("ready");
-      },
-      undefined,
-      () => !disposed && setStatus("error")
-    );
+    const isUsdz = activeMeshUrl.toLowerCase().split("?")[0].endsWith(".usdz");
+
+    const onModelLoaded = (loadedGroup: THREE.Object3D) => {
+      if (disposed) return;
+      root = loadedGroup;
+
+      // Center XZ around origin & align floor near -1.25m for 2D/sun/furniture parity
+      const rawBox = new THREE.Box3().setFromObject(root);
+      const rawCenter = rawBox.getCenter(new THREE.Vector3());
+      const offsetY = -1.25 - rawBox.min.y;
+      root.position.set(-rawCenter.x, offsetY, -rawCenter.z);
+      root.updateMatrixWorld(true);
+
+      root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        if (mesh.geometry && typeof mesh.geometry.computeBoundsTree === "function") {
+          mesh.geometry.computeBoundsTree();
+        }
+        for (const mat of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+          mat.side = THREE.DoubleSide;
+          mat.clippingPlanes = [clip];
+        }
+      });
+      scene.add(root);
+
+      const box = new THREE.Box3().setFromObject(root);
+      const c = box.getCenter(new THREE.Vector3());
+      const r = Math.max(2.5, ...box.getSize(new THREE.Vector3()).toArray());
+      controls.target.copy(c);
+      camera.position.set(c.x + r * 0.7, box.max.y + r * 0.55, c.z + r * 0.9);
+      if (sceneRef.current) sceneRef.current.floorY = box.min.y;
+      setBounds({ min: box.min.y, max: box.max.y });
+      setClipY(box.max.y + 1);
+      setStatus("ready");
+    };
+
+    if (isUsdz) {
+      new USDLoader().load(
+        activeMeshUrl,
+        (group) => onModelLoaded(group),
+        undefined,
+        () => !disposed && setStatus("error")
+      );
+    } else {
+      new GLTFLoader().load(
+        activeMeshUrl,
+        (gltf) => onModelLoaded(gltf.scene),
+        undefined,
+        () => !disposed && setStatus("error")
+      );
+    }
 
     const ray = new THREE.Raycaster();
+    ray.firstHitOnly = true;
     const dom = renderer.domElement;
     let down = [0, 0];
     const onDown = (e: PointerEvent) => (down = [e.clientX, e.clientY]);
@@ -182,10 +264,10 @@ export default function MeshRoomViewer({
       );
 
       if (modeRef.current === "furniture") {
-        const fHits = ray.intersectObjects(furnitureGroup.children, false);
+        const fHits = ray.intersectObjects(furnitureGroup.children, true);
         if (fHits.length > 0) {
           const fid = fHits[0].object.userData.furnitureId as string;
-          setSelectedFurnId(fid);
+          if (fid) setSelectedFurnId(fid);
         }
         return;
       }
@@ -210,10 +292,20 @@ export default function MeshRoomViewer({
       controls.update();
       renderer.render(scene, camera);
       if (++tick % 4) return;
+      if (onCameraSyncChange) {
+        const off = camera.position.clone().sub(controls.target);
+        const sph = new THREE.Spherical().setFromVector3(off);
+        onCameraSyncChange({
+          theta: sph.theta,
+          phi: sph.phi,
+          radius: sph.radius,
+          target: [controls.target.x, controls.target.y, controls.target.z],
+        });
+      }
       const w = container.clientWidth;
       const h = container.clientHeight;
       setProjected(
-        pinsRef.current.map((pin) => {
+        (pinsRef.current || []).map((pin) => {
           const v = new THREE.Vector3(...pin.position).project(camera);
           return {
             pin,
@@ -232,12 +324,20 @@ export default function MeshRoomViewer({
       dom.removeEventListener("pointerdown", onDown);
       dom.removeEventListener("pointerup", onUp);
       window.removeEventListener("resize", resize);
+      if (root) {
+        root.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (m.geometry && typeof m.geometry.disposeBoundsTree === "function") {
+            m.geometry.disposeBoundsTree();
+          }
+        });
+      }
       disposeGroupChildren(sunOverlayGroup);
       tc.dispose();
       controls.dispose();
       renderer.dispose();
     };
-  }, [room.modelUrl, apiBaseUrl]);
+  }, [activeMeshUrl]);
 
   useEffect(() => {
     if (sceneRef.current) sceneRef.current.clip.constant = clipY;
@@ -277,8 +377,14 @@ export default function MeshRoomViewer({
     const s = sceneRef.current;
     if (!s) return;
     s.tc.detach();
-    meshMapRef.current = buildFurnitureGroup(s.furnitureGroup, furnitures, selectedFurnId);
-    if (mode === "furniture" && selectedFurnId) {
+    meshMapRef.current = buildFurnitureGroup(
+      s.furnitureGroup,
+      furnitures,
+      selectedFurnId,
+      conflictIds,
+      s.floorY
+    );
+    if (!readOnly && mode === "furniture" && selectedFurnId) {
       const targetMesh = meshMapRef.current.get(selectedFurnId);
       if (targetMesh) {
         s.tc.setMode(gizmoMode);
@@ -288,7 +394,7 @@ export default function MeshRoomViewer({
         s.tc.attach(targetMesh);
       }
     }
-  }, [furnitures, selectedFurnId, mode, gizmoMode, status]);
+  }, [furnitures, selectedFurnId, mode, gizmoMode, status, conflictIds, readOnly]);
 
   useEffect(() => {
     const g = sceneRef.current?.markers;
@@ -318,22 +424,40 @@ export default function MeshRoomViewer({
     if (m !== "furniture") setSelectedFurnId(null);
   };
 
+  const rotateSelected = (deltaDeg: number) => {
+    if (!selectedFurnId || readOnly) return;
+    const deltaRad = (deltaDeg * Math.PI) / 180;
+    const next = furnitures.map((f) =>
+      f.id === selectedFurnId
+        ? { ...f, rotationY: +((f.rotationY || 0) + deltaRad).toFixed(3) }
+        : f
+    );
+    setFurnitures(next);
+    onUpdateFurnitures?.(next);
+  };
+
   return (
     <div className="relative flex h-full min-h-[340px] w-full flex-col overflow-hidden border border-ink bg-stage">
-      <div className="vbar absolute left-3 top-3 z-20">
-        <button onClick={() => toggle("measure")} className={`vbtn ${mode === "measure" ? "vbtn-on" : ""}`}>
-          <Ruler className="h-3.5 w-3.5" /> 치수
-        </button>
-        <button onClick={() => toggle("pin")} className={`vbtn ${mode === "pin" ? "vbtn-on" : ""}`}>
-          <MapPin className="h-3.5 w-3.5" /> 핀
-        </button>
-        <button onClick={() => toggle("furniture")} className={`vbtn ${mode === "furniture" ? "vbtn-on" : ""}`}>
-          <Box className="h-3.5 w-3.5" /> 가구 배치 ({furnitures.length})
-        </button>
-        <button onClick={() => toggle("sun")} className={`vbtn ${mode === "sun" ? "vbtn-on" : ""}`}>
-          <Sun className="h-3.5 w-3.5" /> 채광
-        </button>
-      </div>
+      {!compact && (
+        <div className="vbar absolute left-3 top-3 z-20">
+          <button onClick={() => toggle("measure")} className={`vbtn ${mode === "measure" ? "vbtn-on" : ""}`}>
+            <Ruler className="h-3.5 w-3.5" /> 치수
+          </button>
+          {!readOnly && (
+            <>
+              <button onClick={() => toggle("pin")} className={`vbtn ${mode === "pin" ? "vbtn-on" : ""}`}>
+                <MapPin className="h-3.5 w-3.5" /> 핀
+              </button>
+              <button onClick={() => toggle("furniture")} className={`vbtn ${mode === "furniture" ? "vbtn-on" : ""}`}>
+                <Box className="h-3.5 w-3.5" /> 가구 배치 ({furnitures.length})
+              </button>
+            </>
+          )}
+          <button onClick={() => toggle("sun")} className={`vbtn ${mode === "sun" ? "vbtn-on" : ""}`}>
+            <Sun className="h-3.5 w-3.5" /> 채광
+          </button>
+        </div>
+      )}
 
       {mode === "sun" && (
         <div className="pointer-events-none absolute bottom-14 left-3 right-3 z-20">
@@ -344,7 +468,7 @@ export default function MeshRoomViewer({
             playing={playing}
             onChangeParams={updateParams}
             onTogglePlay={togglePlay}
-            onUpdateRoomLocationAndDirection={(patch) => onUpdateRoom?.(patch)}
+            onUpdateRoomLocationAndDirection={readOnly ? undefined : (patch) => onUpdateRoom?.(patch)}
             onClose={() => setMode("none")}
           />
         </div>
@@ -356,9 +480,11 @@ export default function MeshRoomViewer({
           hasStart={measure.length === 1}
         />
       )}
-      {mode === "pin" && (
+      {!readOnly && mode === "pin" && (
         <PinPrompt
           position={pending}
+          roomId={room.id}
+          apiBaseUrl={apiBaseUrl}
           onSave={(pin) => {
             onAddPin?.(pin);
             setPending(null);
@@ -366,13 +492,15 @@ export default function MeshRoomViewer({
           }}
         />
       )}
-      {mode === "furniture" && (
+      {!readOnly && mode === "furniture" && (
         <FurniturePaletteBar
           furnitures={furnitures}
           selectedId={selectedFurnId}
           gizmoMode={gizmoMode}
+          conflicts={conflicts}
           onChangeGizmoMode={setGizmoMode}
           onSelect={setSelectedFurnId}
+          onRotateSelected={rotateSelected}
           onAdd={(item) => {
             const next = [...furnitures, item];
             setFurnitures(next);
@@ -392,17 +520,16 @@ export default function MeshRoomViewer({
         className={`min-h-[340px] w-full flex-1 ${mode !== "none" && mode !== "sun" ? "cursor-crosshair" : ""}`}
         style={{ touchAction: "none" }}
       />
-      <PinLabels pins={projected} />
+      <PinLabels pins={projected} apiBaseUrl={apiBaseUrl} />
 
       <div className="pointer-events-none absolute bottom-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2">
         <button
           type="button"
           onClick={() => toggle("sun")}
           className="vbar pointer-events-auto px-2.5 py-1 text-xs hover:text-amber-300"
-          title="위치·방위 기반 채광 설정 열기"
         >
-          {sunState.location.label} · {room.direction || "남향"} ·{" "}
-          {sunState.isDirectSunlight ? "직사광" : "간접광"}
+          {activeMeshUrl.toLowerCase().includes(".usdz") ? "USDZ 메시" : "GLB 메시"} · {sunState.location.label} ·{" "}
+          {room.direction || "남향"} · {sunState.isDirectSunlight ? "직사광" : "간접광"}
         </button>
 
         {bounds && (
@@ -421,8 +548,8 @@ export default function MeshRoomViewer({
         )}
       </div>
 
-      {status === "loading" && <ViewerLoading text="스캔 불러오는 중…" />}
-      {status === "error" && <ViewerLoading text="3D 모델을 불러오지 못했습니다." />}
+      {status === "loading" && <ViewerLoading text="LiDAR 메시(.glb/.usdz) 불러오는 중…" />}
+      {status === "error" && <ViewerLoading text="3D 메시 모델을 불러오지 못했습니다." />}
     </div>
   );
 }

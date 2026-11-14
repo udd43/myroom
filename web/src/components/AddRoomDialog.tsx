@@ -2,14 +2,29 @@
 
 import React, { useMemo, useState } from "react";
 import { LocateFixed, Search, X } from "lucide-react";
-import { NewRoomMeta, Quality, UploadKind } from "@/types/room";
+import { BjdongMeta, NewRoomMeta, Quality, UploadKind } from "@/types/room";
+import { api, getApiBaseUrl } from "@/lib/api";
 import { CHECKLIST, DEFAULT_CHECKLIST, GRADES } from "@/lib/checklist";
 import { DIRECTION_OPTIONS, matchPresetFromText, SEOUL_DISTRICT_PRESETS } from "@/lib/sunlight";
 import { requestBrowserGpsLocation, resolveAddressToCoords } from "@/lib/locationClient";
 
 interface Props {
+  apiBase?: string;
+  serverOnline?: boolean;
   onClose: () => void;
   onSubmit: (meta: NewRoomMeta, file: File | null, kind: UploadKind, quality: Quality) => Promise<void>;
+}
+
+interface JusoCandidate {
+  roadAddr: string;
+  jibunAddr: string;
+  bdNm: string;
+  admCd: string;
+  sigunguCd: string;
+  bjdongCd: string;
+  platGbCd: string;
+  bun: string;
+  ji: string;
 }
 
 const EMPTY: NewRoomMeta = {
@@ -41,14 +56,15 @@ const TEXT_FIELDS: Array<{ key: "roomStructure" | "floor"; label: string; ph: st
   { key: "floor", label: "층", ph: "4층 / 5층" },
 ];
 
-const SCAN_EXT = [".glb", ".usdz", ".json", ".splat", ".ply"];
+const SCAN_EXT = [".glb", ".usdz", ".json", ".splat", ".spz", ".sog", ".ply"];
 
 function kindOf(file: File | null): UploadKind {
   if (!file) return "none";
   return SCAN_EXT.some((e) => file.name.toLowerCase().endsWith(e)) ? "3d" : "video";
 }
 
-export default function AddRoomDialog({ onClose, onSubmit }: Props) {
+export default function AddRoomDialog({ apiBase, serverOnline = false, onClose, onSubmit }: Props) {
+  const effectiveBase = apiBase ?? getApiBaseUrl();
   const [form, setForm] = useState<NewRoomMeta>(EMPTY);
   const [file, setFile] = useState<File | null>(null);
   const [quality, setQuality] = useState<Quality>("high");
@@ -56,6 +72,7 @@ export default function AddRoomDialog({ onClose, onSubmit }: Props) {
   const [locating, setLocating] = useState(false);
   const [geocoding, setGeocoding] = useState(false);
   const [geoNotice, setGeoNotice] = useState<string | null>(null);
+  const [jusoCandidates, setJusoCandidates] = useState<JusoCandidate[]>([]);
 
   const set = <K extends keyof NewRoomMeta>(k: K, v: NewRoomMeta[K]) => setForm((f) => ({ ...f, [k]: v }));
   const kind = kindOf(file);
@@ -81,21 +98,96 @@ export default function AddRoomDialog({ onClose, onSubmit }: Props) {
     }
   };
 
+  const applyJusoCandidate = async (cand: JusoCandidate) => {
+    setJusoCandidates([]);
+    const bjdongMeta: BjdongMeta = {
+      admCd: cand.admCd,
+      sigunguCd: cand.sigunguCd,
+      bjdongCd: cand.bjdongCd,
+      bun: cand.bun,
+      ji: cand.ji,
+      platGbCd: cand.platGbCd,
+    };
+    setForm((f) => ({
+      ...f,
+      address: cand.roadAddr || cand.jibunAddr || f.address,
+      bjdongMeta,
+    }));
+    if (serverOnline && effectiveBase) {
+      const geo = await api.geocodeKakao(effectiveBase, cand.roadAddr).catch(() => null);
+      if (geo?.found && typeof geo.latitude === "number" && typeof geo.longitude === "number") {
+        setForm((f) => ({
+          ...f,
+          latitude: geo.latitude,
+          longitude: geo.longitude,
+          locationLabel: geo.regionLabel || cand.bdNm || cand.roadAddr,
+        }));
+        return;
+      }
+    }
+    const osm = await resolveAddressToCoords(cand.roadAddr || cand.jibunAddr);
+    if (osm) {
+      setForm((f) => ({
+        ...f,
+        latitude: osm.latitude,
+        longitude: osm.longitude,
+        locationLabel: osm.locationLabel,
+      }));
+    }
+  };
+
   const lookupAddressCoords = async () => {
     if (!form.address.trim()) return;
     setGeocoding(true);
     setGeoNotice(null);
-    const hit = await resolveAddressToCoords(form.address);
-    setGeocoding(false);
-    if (hit) {
-      setForm((f) => ({
-        ...f,
-        latitude: hit.latitude,
-        longitude: hit.longitude,
-        locationLabel: hit.locationLabel,
-      }));
-    } else {
-      setGeoNotice("주소를 찾지 못했습니다. 서울 자치구 목록에서 직접 선택해 주세요.");
+    setJusoCandidates([]);
+    try {
+      if (serverOnline && effectiveBase) {
+        const res = await api.searchAddress(effectiveBase, form.address).catch(() => null);
+        const items = res?.juso?.items || [];
+        const kakao = res?.kakao;
+        if (items.length > 1) {
+          setJusoCandidates(items.slice(0, 6));
+          setGeoNotice("아래 도로명주소 중 정확한 매물을 선택하면 건축물대장·실거래 연동 코드가 자동 입력됩니다.");
+        } else if (items.length === 1) {
+          await applyJusoCandidate(items[0]);
+          if (kakao?.found && typeof kakao.latitude === "number") return;
+        }
+        if (kakao?.found && typeof kakao.latitude === "number" && typeof kakao.longitude === "number") {
+          setForm((f) => ({
+            ...f,
+            latitude: kakao.latitude,
+            longitude: kakao.longitude,
+            locationLabel: kakao.regionLabel || kakao.addressName,
+            bjdongMeta:
+              f.bjdongMeta ??
+              (kakao.sigunguCd && kakao.bjdongCd && kakao.bun
+                ? {
+                    sigunguCd: kakao.sigunguCd,
+                    bjdongCd: kakao.bjdongCd,
+                    bun: kakao.bun,
+                    ji: kakao.ji || "0000",
+                  }
+                : f.bjdongMeta),
+          }));
+          return;
+        }
+        if (items.length > 0) return;
+      }
+
+      const hit = await resolveAddressToCoords(form.address);
+      if (hit) {
+        setForm((f) => ({
+          ...f,
+          latitude: hit.latitude,
+          longitude: hit.longitude,
+          locationLabel: hit.locationLabel,
+        }));
+      } else {
+        setGeoNotice("주소를 찾지 못했습니다. 서울 자치구 목록에서 직접 선택해 주세요.");
+      }
+    } finally {
+      setGeocoding(false);
     }
   };
 
@@ -136,7 +228,7 @@ export default function AddRoomDialog({ onClose, onSubmit }: Props) {
               </span>
               <input
                 type="file"
-                accept="video/*,.glb,.usdz,.json,.splat,.ply"
+                accept="video/*,.glb,.usdz,.json,.splat,.spz,.sog,.ply"
                 className="hidden"
                 onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               />
@@ -233,6 +325,24 @@ export default function AddRoomDialog({ onClose, onSubmit }: Props) {
                   ))}
                 </select>
               </div>
+              {jusoCandidates.length > 0 && (
+                <ul className="max-h-36 divide-y divide-line overflow-y-auto border border-ink bg-card text-xs">
+                  {jusoCandidates.map((c, idx) => (
+                    <li key={`${c.roadAddr}-${idx}`}>
+                      <button
+                        type="button"
+                        onClick={() => applyJusoCandidate(c)}
+                        className="w-full px-2.5 py-1.5 text-left hover:bg-paper"
+                      >
+                        <div className="font-medium text-ink">
+                          {c.roadAddr} {c.bdNm ? `(${c.bdNm})` : ""}
+                        </div>
+                        <div className="text-[11px] text-mute">{c.jibunAddr}</div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               {typeof form.latitude === "number" && typeof form.longitude === "number" ? (
                 <p className="num text-xs font-medium text-ok">
                   지정된 좌표: {form.locationLabel || "사용자 지정"} ({form.latitude.toFixed(4)}°N,{" "}

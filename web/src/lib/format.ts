@@ -7,6 +7,11 @@ export const sqm = (pyeong: number) => (pyeong * 3.3058).toFixed(1);
 export const monthlyTotal = (r: Pick<RoomItem, "monthlyRent" | "maintenanceFee">) =>
   r.monthlyRent + r.maintenanceFee;
 
+export const effectiveMonthlyCost = (
+  r: Pick<RoomItem, "deposit" | "monthlyRent" | "maintenanceFee">,
+  annualRatePct = 4.0
+) => +(r.deposit * (annualRatePct / 100) / 12 + r.monthlyRent + r.maintenanceFee).toFixed(1);
+
 export const priceLine = (r: RoomItem) =>
   `${man(r.deposit)} / ${r.monthlyRent} + ${r.maintenanceFee}`;
 

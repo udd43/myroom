@@ -1,4 +1,5 @@
-import { RoomItem, RoomPlanOpening, RoomPlanWall } from "@/types/room";
+import * as SunCalc from "suncalc";
+import { NeighborBuilding, RoomItem, RoomPlanOpening, RoomPlanWall } from "@/types/room";
 
 export type SeasonPresetId = "today" | "winter" | "equinox" | "summer";
 
@@ -104,11 +105,8 @@ export interface RoomWindow3D {
   z: number;
   widthM: number;
   rotationDeg: number;
-  /** 실내에서 창밖을 향하는 수평 단위 법선 벡터 (XZ 평면) */
   outwardNormal: [number, number];
-  /** 창문 가로 방향 단위 접선 벡터 (XZ 평면) */
   tangent: [number, number];
-  /** 방 바닥 기준 창문 하단/상단 높이 (m) */
   sillHeightM: number;
   headHeightM: number;
 }
@@ -126,16 +124,13 @@ export interface RoomSunState {
   roomFacingLabel: string;
   primaryWindowAzimuthDeg: number;
   minObstructionAltDeg: number;
-  /** 방 3D 좌표계에서 태양을 향하는 단위 벡터 (Outward toward Sun) */
+  roomElevationM: number;
+  blockedByBuilding: NeighborBuilding | null;
   towardSunRoom: [number, number, number];
-  /** 방 3D 좌표계에서 빛이 창문을 통해 방 안으로 들어오는 방향 (Incoming Ray) */
   incomingRayRoom: [number, number, number];
-  /** 주 창문 정면 기준 입사 코사인 (-1..1, 양수일수록 창을 통해 직사광 유입) */
   windowIncidence: number;
   isDirectSunlight: boolean;
-  /** 0..1 직사광 강도 */
   directIntensity: number;
-  /** 색온도 보정 RGB [r, g, b] */
   sunColor: [number, number, number];
   skyColor: [number, number, number];
   skyIntensity: number;
@@ -148,8 +143,9 @@ export interface HourlySunSample {
   label: string;
   altitudeDeg: number;
   azimuthDeg: number;
-  directFactor: number; // 0..1
+  directFactor: number;
   inView: boolean;
+  blockedByName?: string;
 }
 
 export interface DailySunlightSummary {
@@ -184,9 +180,6 @@ export function azimuthDegToKorean(azDeg: number): string {
   return `${dirs[Math.round(norm / 45) % 8]} (${Math.round(norm)}°)`;
 }
 
-/**
- * 매물 향 문자열(남향/남동향/북향 등)을 진북=0°, 동=90°, 남=180°, 서=270° 방위각(도)으로 변환합니다.
- */
 export function parseDirectionAzimuthDeg(direction?: string | null): number {
   const d = (direction || "").trim();
   if (!d) return 180;
@@ -206,9 +199,15 @@ export function parseDirectionAzimuthDeg(direction?: string | null): number {
   return 180;
 }
 
-/**
- * 주소/제목 문자열에서 가장 잘 맞는 한국/서울 자치구·지역 프리셋을 찾습니다.
- */
+export function estimateRoomElevationM(floorStr?: string | null): number {
+  const f = (floorStr || "").trim();
+  if (f.includes("반지하") || f.includes("지하")) return 0.6;
+  const m = f.match(/(\d+)\s*층/);
+  if (!m) return 4.2;
+  const floorNum = Math.max(1, parseInt(m[1], 10));
+  return (floorNum - 1) * 3.0 + 1.6;
+}
+
 export function matchPresetFromText(text: string): LocationPreset | null {
   const normalized = (text || "").trim();
   if (!normalized) return null;
@@ -220,14 +219,7 @@ export function matchPresetFromText(text: string): LocationPreset | null {
   return null;
 }
 
-/**
- * 위·경도에서 가장 가까운 서울 자치구 또는 지역 프리셋을 찾습니다 (기본 maxKm=15km).
- */
-export function findNearestPresetForCoords(
-  lat: number,
-  lon: number,
-  maxKm = 15
-): LocationPreset | null {
+export function findNearestPresetForCoords(lat: number, lon: number, maxKm = 15): LocationPreset | null {
   let best: LocationPreset | null = null;
   let bestKm = maxKm;
   for (const preset of KOREA_LOCATION_PRESETS) {
@@ -243,9 +235,6 @@ export function findNearestPresetForCoords(
   return best;
 }
 
-/**
- * 매물 주소 / 저장된 GPS 좌표 기반으로 위도·경도를 결정합니다.
- */
 export function resolveRoomLocation(room: RoomItem): ResolvedLocation {
   if (
     typeof room.latitude === "number" &&
@@ -260,18 +249,13 @@ export function resolveRoomLocation(room: RoomItem): ResolvedLocation {
       source: "gps_saved",
     };
   }
-
   const matched = matchPresetFromText(`${room.address || ""} ${room.title || ""}`);
   if (matched) {
     return { lat: matched.lat, lon: matched.lon, label: matched.label, source: "address" };
   }
-
   return { lat: 37.5665, lon: 126.978, label: "서울특별시 기준", source: "default" };
 }
 
-/**
- * 층수 문자열에서 저층 주변 건물 차폐 최소 고도(도)를 추정합니다.
- */
 export function estimateObstructionAltitudeDeg(floorStr?: string | null): number {
   const f = (floorStr || "").trim();
   if (f.includes("반지하") || f.includes("지하")) return 24;
@@ -285,10 +269,17 @@ export function estimateObstructionAltitudeDeg(floorStr?: string | null): number
   return 1.5;
 }
 
-/**
- * NOAA 태양 적위/균시차 및 구면천문학(East, North, Up) 기반 태양 고도 및 진방위각 계산.
- * KST(UTC+9, 기준 경선 135°E) 보정을 포함합니다.
- */
+function localTimeToDate(dayOfYear: number, minutesOfDay: number, tzOffsetMinutes: number): Date {
+  const year = new Date().getFullYear();
+  const utcMs =
+    Date.UTC(year, 0, 1, 0, 0, 0) +
+    (dayOfYear - 1) * 86_400_000 +
+    minutesOfDay * 60_000 -
+    tzOffsetMinutes * 60_000;
+  return new Date(utcMs);
+}
+
+/** SunCalc v2 기반 태양 고도 및 진방위각 계산 (0=N, 90=E, 180=S, 270=W) */
 export function calculateSolarPosition(
   dayOfYear: number,
   minutesOfDay: number,
@@ -296,99 +287,103 @@ export function calculateSolarPosition(
   lonDeg: number,
   tzOffsetMinutes = 540
 ): SolarPosition {
-  const degToRad = Math.PI / 180;
-  const radToDeg = 180 / Math.PI;
-
-  const hour = minutesOfDay / 60;
-  const gamma = ((2 * Math.PI) / 365) * (dayOfYear - 1 + (hour - 12) / 24);
-
-  const eqTime =
-    229.18 *
-    (0.000075 +
-      0.001868 * Math.cos(gamma) -
-      0.032077 * Math.sin(gamma) -
-      0.014615 * Math.cos(2 * gamma) -
-      0.040849 * Math.sin(2 * gamma));
-
-  const declRad =
-    0.006918 -
-    0.399912 * Math.cos(gamma) +
-    0.070257 * Math.sin(gamma) -
-    0.006758 * Math.cos(2 * gamma) +
-    0.000907 * Math.sin(2 * gamma) -
-    0.002697 * Math.cos(3 * gamma) +
-    0.00148 * Math.sin(3 * gamma);
-
-  const tst = (((minutesOfDay + eqTime + 4 * lonDeg - tzOffsetMinutes) % 1440) + 1440) % 1440;
-  const haRad = (tst / 4 - 180) * degToRad;
-  const latRad = latDeg * degToRad;
-
-  const sinDecl = Math.sin(declRad);
-  const cosDecl = Math.cos(declRad);
-  const sinLat = Math.sin(latRad);
-  const cosLat = Math.cos(latRad);
-  const cosHa = Math.cos(haRad);
-  const sinHa = Math.sin(haRad);
-
-  const east = -cosDecl * sinHa;
-  const north = cosLat * sinDecl - sinLat * cosDecl * cosHa;
-  const up = Math.max(-1, Math.min(1, sinLat * sinDecl + cosLat * cosDecl * cosHa));
-
-  const altitudeDeg = Math.asin(up) * radToDeg;
-  const azimuthDeg = ((Math.atan2(east, north) * radToDeg) % 360 + 360) % 360;
-
+  const date = localTimeToDate(dayOfYear, minutesOfDay, tzOffsetMinutes);
+  const pos = SunCalc.getPosition(date, latDeg, lonDeg);
+  const azimuthDeg = ((pos.azimuth % 360) + 360) % 360;
   return {
-    altitudeDeg,
+    altitudeDeg: pos.altitude,
     azimuthDeg,
-    isDaylight: altitudeDeg > 0.5,
+    isDaylight: pos.altitude > 0.5,
   };
 }
 
-/**
- * 지정된 위·경도 및 날짜의 일출·남중(최고 고도)·일몰 시각과 낮 길이를 계산합니다.
- */
+/** SunCalc v2 기반 일출·남중·일몰·낮 길이 계산 */
 export function computeSolarDayEvents(
   dayOfYear: number,
   latDeg: number,
   lonDeg: number,
   tzOffsetMinutes = 540
 ): SolarDayEvents {
-  let sunriseMin = 7 * 60;
-  let sunsetMin = 17 * 60 + 30;
-  let solarNoonMin = 12 * 60 + 30;
-  let maxAltitudeDeg = -90;
-  let foundSunrise = false;
-  let prevAlt = -90;
+  const midday = localTimeToDate(dayOfYear, 12 * 60, tzOffsetMinutes);
+  const dayStartMs = localTimeToDate(dayOfYear, 0, tzOffsetMinutes).getTime();
+  const times = SunCalc.getTimes(midday, latDeg, lonDeg, 0, tzOffsetMinutes);
 
-  for (let min = 4 * 60; min <= 21 * 60; min += 4) {
-    const { altitudeDeg } = calculateSolarPosition(dayOfYear, min, latDeg, lonDeg, tzOffsetMinutes);
-    if (!foundSunrise && prevAlt <= 0 && altitudeDeg > 0) {
-      sunriseMin = min - 2;
-      foundSunrise = true;
-    }
-    if (foundSunrise && prevAlt > 0 && altitudeDeg <= 0) {
-      sunsetMin = min - 2;
-      break;
-    }
-    if (altitudeDeg > maxAltitudeDeg) {
-      maxAltitudeDeg = altitudeDeg;
-      solarNoonMin = min;
-    }
-    prevAlt = altitudeDeg;
-  }
+  const toMin = (d: Date | null | undefined, fallback: number): number => {
+    if (!d || !Number.isFinite(d.getTime())) return fallback;
+    return Math.max(0, Math.min(1439, Math.round((d.getTime() - dayStartMs) / 60_000)));
+  };
+
+  const sunriseMin = toMin(times.sunrise, 6 * 60 + 30);
+  const solarNoonMin = toMin(times.solarNoon, 12 * 60 + 30);
+  const sunsetMin = toMin(times.sunset, 18 * 60);
+  const noonPos = SunCalc.getPosition(times.solarNoon, latDeg, lonDeg);
 
   return {
     sunriseMin,
     solarNoonMin,
     sunsetMin,
     dayLengthHours: Math.max(0, Math.round(((sunsetMin - sunriseMin) / 60) * 10) / 10),
-    maxAltitudeDeg: Math.round(maxAltitudeDeg),
+    maxAltitudeDeg: Math.round(noonPos.altitude),
   };
 }
 
 /**
- * RoomPlan 창문 개구부 목록으로부터 3D 창문 위치와 실내->실외 법선 벡터를 추출합니다.
+ * 실제 3D 레이-박스 교차(Ray-AABB) 검사로 주변 건물 그림자에 태양광이 가려지는지 판별합니다.
  */
+export function findBlockingNeighbor(
+  neighbors: NeighborBuilding[] | undefined,
+  roomElevationM: number,
+  worldAzDeg: number,
+  worldAltDeg: number
+): NeighborBuilding | null {
+  if (!neighbors || neighbors.length === 0 || worldAltDeg <= 0) return null;
+
+  const azRad = (worldAzDeg * Math.PI) / 180;
+  const altRad = (worldAltDeg * Math.PI) / 180;
+  const dx = Math.sin(azRad) * Math.cos(altRad);
+  const dy = Math.sin(altRad);
+  const dz = -Math.cos(azRad) * Math.cos(altRad);
+
+  const oy = roomElevationM;
+
+  let closestT = Infinity;
+  let blocker: NeighborBuilding | null = null;
+
+  for (const b of neighbors) {
+    if (b.heightM <= oy + 0.2) continue;
+    const minX = b.xM - b.widthM / 2;
+    const maxX = b.xM + b.widthM / 2;
+    const minY = 0;
+    const maxY = b.heightM;
+    const minZ = b.zM - b.depthM / 2;
+    const maxZ = b.zM + b.depthM / 2;
+
+    const slab = (orig: number, dir: number, lo: number, hi: number): [number, number] => {
+      if (Math.abs(dir) < 1e-6) {
+        return orig >= lo && orig <= hi ? [-Infinity, Infinity] : [Infinity, -Infinity];
+      }
+      const inv = 1 / dir;
+      const t1 = (lo - orig) * inv;
+      const t2 = (hi - orig) * inv;
+      return t1 <= t2 ? [t1, t2] : [t2, t1];
+    };
+
+    const [tx1, tx2] = slab(0, dx, minX, maxX);
+    const [ty1, ty2] = slab(oy, dy, minY, maxY);
+    const [tz1, tz2] = slab(0, dz, minZ, maxZ);
+
+    const tEnter = Math.max(tx1, ty1, tz1);
+    const tExit = Math.min(tx2, ty2, tz2);
+
+    if (tExit >= Math.max(0.5, tEnter) && tEnter < closestT) {
+      closestT = tEnter;
+      blocker = b;
+    }
+  }
+
+  return blocker;
+}
+
 export function extractRoomWindows(room: RoomItem): RoomWindow3D[] {
   const openings: RoomPlanOpening[] = room.roomPlan?.openings || [];
   const rawWins = openings.filter((o) => o.type === "window");
@@ -414,7 +409,6 @@ export function extractRoomWindows(room: RoomItem): RoomWindow3D[] {
     const rad = ((w.rotationDeg || 0) * Math.PI) / 180;
     const tx = Math.cos(rad);
     const tz = Math.sin(rad);
-    // 접선에 수직인 두 법선 후보 중 방 중심(0,0)에서 바깥쪽을 향하는 방향 선택
     let nx = -tz;
     let nz = tx;
     if (nx * w.x + nz * w.z < 0) {
@@ -437,13 +431,9 @@ export function extractRoomWindows(room: RoomItem): RoomWindow3D[] {
 }
 
 function sceneNormalToAzimuthDeg(nx: number, nz: number): number {
-  // 씬 기본 XZ 기준: -Z = 0°, +X = 90°, +Z = 180°, -X = 270°
   return ((Math.atan2(nx, -nz) * 180) / Math.PI + 360) % 360;
 }
 
-/**
- * 주어진 날짜·시간·위치·집 향(direction)에 대해 방 3D 공간 내 실제 태양광 상태와 창문 입사량을 계산합니다.
- */
 export function computeRoomSunState(
   room: RoomItem,
   opts: {
@@ -458,7 +448,6 @@ export function computeRoomSunState(
   const world = calculateSolarPosition(opts.dayOfYear, opts.minutesOfDay, location.lat, location.lon);
   const windows = extractRoomWindows(room);
 
-  // 가장 넓은 주 창문을 매물의 대표 향 기준으로 정렬
   const primaryWin = windows.reduce((best, cur) => (cur.widthM > best.widthM ? cur : best), windows[0]);
   const primaryWinSceneAzDeg = sceneNormalToAzimuthDeg(
     primaryWin.outwardNormal[0],
@@ -470,7 +459,6 @@ export function computeRoomSunState(
   const roomFacingAzimuthDeg =
     ((parseDirectionAzimuthDeg(dirStr) + headingOffset) % 360 + 360) % 360;
 
-  // 세계 나침반 각도 -> 3D/2D 방 평면 좌표 각도 회전
   const deltaDeg = primaryWinSceneAzDeg - roomFacingAzimuthDeg;
   const roomSunAzRad = ((world.azimuthDeg + deltaDeg) * Math.PI) / 180;
   const altRad = (world.altitudeDeg * Math.PI) / 180;
@@ -482,8 +470,12 @@ export function computeRoomSunState(
 
   const minObstructionAltDeg =
     opts.considerObstruction === false ? 1.0 : estimateObstructionAltitudeDeg(room.floor);
+  const roomElevationM = estimateRoomElevationM(room.floor);
+  const blockedByBuilding =
+    opts.considerObstruction === false
+      ? null
+      : findBlockingNeighbor(room.neighborBuildings, roomElevationM, world.azimuthDeg, world.altitudeDeg);
 
-  // 모든 창문 중 가장 강하게 비치는 입사 코사인 평가
   let bestIncidence = -1;
   for (const w of windows) {
     const horizLen = Math.hypot(sx, sz) || 1;
@@ -495,9 +487,8 @@ export function computeRoomSunState(
 
   const aboveSkyline = world.altitudeDeg > minObstructionAltDeg;
   const windowFacingSun = bestIncidence > 0.06;
-  const isDirectSunlight = world.isDaylight && aboveSkyline && windowFacingSun;
+  const isDirectSunlight = world.isDaylight && aboveSkyline && windowFacingSun && !blockedByBuilding;
 
-  // 저각도 황금빛 -> 정오 중성 백색광 -> 박명/차광 시 푸른 간접광 색온도 계산
   const altFactor = Math.max(0, Math.min(1, (world.altitudeDeg - 2) / 38));
   const rawStrength = isDirectSunlight
     ? Math.pow(Math.max(0, bestIncidence), 0.72) * (0.35 + 0.65 * Math.sin(Math.max(0.08, altRad)))
@@ -519,7 +510,6 @@ export function computeRoomSunState(
     skyColor = [0.88, 0.93, 1.0];
     skyIntensity = 0.56 + 0.14 * altFactor;
   } else {
-    // 북향 또는 태양 반대편 창문: 맑지만 직사광 없는 간접 천공광(차분한 쿨톤)
     skyColor = [0.74, 0.84, 0.98];
     skyIntensity = 0.42 + 0.14 * altFactor;
   }
@@ -527,8 +517,10 @@ export function computeRoomSunState(
   let statusText: string;
   if (!world.isDaylight) {
     statusText = "일몰 후 (자연광 없음)";
+  } else if (blockedByBuilding) {
+    statusText = `건물 그림자 차폐 ('${blockedByBuilding.name}' ${blockedByBuilding.heightM}m · 고도 ${Math.round(world.altitudeDeg)}°)`;
   } else if (!aboveSkyline) {
-    statusText = `태양 고도 ${Math.round(world.altitudeDeg)}° (주변 건물·지평선 차폐 < ${Math.round(minObstructionAltDeg)}°)`;
+    statusText = `태양 고도 ${Math.round(world.altitudeDeg)}° (주변 지평선 차폐 < ${Math.round(minObstructionAltDeg)}°)`;
   } else if (isDirectSunlight) {
     statusText = `직사광 유입 · 고도 ${Math.round(world.altitudeDeg)}° · ${azimuthDegToKorean(world.azimuthDeg)}`;
   } else {
@@ -542,6 +534,8 @@ export function computeRoomSunState(
     roomFacingLabel: (dirStr || "남향").trim(),
     primaryWindowAzimuthDeg: primaryWinSceneAzDeg,
     minObstructionAltDeg,
+    roomElevationM,
+    blockedByBuilding,
     towardSunRoom: [sx, sy, sz],
     incomingRayRoom: [-sx, -sy, -sz],
     windowIncidence: bestIncidence,
@@ -588,9 +582,6 @@ function integrateDaylightHours(
   };
 }
 
-/**
- * 매물의 현재 계절·동지·춘추분·하지 기준 하루 일조시간과 시간대별 그래프 데이터를 계산합니다.
- */
 export function analyzeDailySunlight(
   room: RoomItem,
   dayOfYear: number,
@@ -615,6 +606,7 @@ export function analyzeDailySunlight(
       azimuthDeg: Math.round(st.world.azimuthDeg),
       directFactor: st.isDirectSunlight ? st.directIntensity : 0,
       inView: st.isDirectSunlight,
+      blockedByName: st.blockedByBuilding?.name,
     });
   }
 
@@ -626,7 +618,7 @@ export function analyzeDailySunlight(
 
   const summaryLine =
     cur.peakHour !== null
-      ? `일조 ${cur.hours.toFixed(1)}시간 (피크 ${formatMinutesToHHMM(cur.peakHour)}, 동지 ${winter.hours.toFixed(1)}h)`
+      ? `실질 일조 ${cur.hours.toFixed(1)}시간 (피크 ${formatMinutesToHHMM(cur.peakHour)}, 동지 ${winter.hours.toFixed(1)}h)`
       : `직사광 적음 (동지 ${winter.hours.toFixed(1)}h · 간접광 위주)`;
 
   return {
@@ -642,10 +634,6 @@ export function analyzeDailySunlight(
   };
 }
 
-/**
- * 2D 평면도 & 3D 바닥에서 각 창문을 통해 들어오는 직사광 바닥 투영 다각형을 계산합니다.
- * 내벽(roomPlan.walls) 및 외곽선을 고려해 투사 광선을 클리핑합니다.
- */
 export function computeWindowFloorSunPolygons(
   room: RoomItem,
   sunState: RoomSunState
@@ -665,7 +653,6 @@ export function computeWindowFloorSunPolygons(
 
   const castRayToWall = (ox: number, oz: number, dx: number, dz: number, maxDist: number): number => {
     let bestT = maxDist;
-    // 외곽 박스 클리핑
     if (Math.abs(dx) > 1e-5) {
       const tx = ((dx > 0 ? wMax : -wMax) - ox) / dx;
       if (tx > 0.08 && tx < bestT) bestT = tx;
@@ -674,7 +661,6 @@ export function computeWindowFloorSunPolygons(
       const tz = ((dz > 0 ? dMax : -dMax) - oz) / dz;
       if (tz > 0.08 && tz < bestT) bestT = tz;
     }
-    // 내부 가벽 등 벽체 교차 클리핑
     for (const w of walls) {
       const wx = w.x2 - w.x1;
       const wz = w.z2 - w.z1;
@@ -701,13 +687,11 @@ export function computeWindowFloorSunPolygons(
     const cosInc = (sx / hLen) * win.outwardNormal[0] + (sz / hLen) * win.outwardNormal[1];
     if (cosInc <= 0.06) continue;
 
-    // 햇빛이 창 하단(sill) ~ 상단(head) 높이에서 바닥(y=0)에 닿는 투사 거리
     const nearDist = Math.min(maxProjectionDist, Math.abs(win.sillHeightM * (horizSpeed / -ry)));
     const farDist = Math.min(maxProjectionDist, Math.abs(win.headHeightM * (horizSpeed / -ry)));
 
     const halfW = win.widthM * 0.48;
     const [tx, tz] = win.tangent;
-    // 창문 바로 안쪽으로 0.02m 이동해 본인 벽에 막히지 않게 처리
     const insetX = -win.outwardNormal[0] * 0.03;
     const insetZ = -win.outwardNormal[1] * 0.03;
 
@@ -716,7 +700,6 @@ export function computeWindowFloorSunPolygons(
     const pRightX = win.x + tx * halfW + insetX;
     const pRightZ = win.z + tz * halfW + insetZ;
 
-    // 광선 샘플 5개로 분할해 가벽 모서리도 자연스럽게 따라가도록 다각형 구성
     const nearPts: Array<[number, number]> = [];
     const farPts: Array<[number, number]> = [];
     const steps = 6;
@@ -731,10 +714,8 @@ export function computeWindowFloorSunPolygons(
       farPts.push([px + ux * tFar, pz + uz * tFar]);
     }
 
-    const polygon = [...nearPts, ...farPts.reverse()];
-    results.push({ windowId: win.id, polygon });
+    results.push({ windowId: win.id, polygon: [...nearPts, ...farPts.reverse()] });
   }
 
   return results;
 }
-

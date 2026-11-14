@@ -12,6 +12,13 @@ interface Props {
 }
 
 function Status({ r }: { r: RoomItem }) {
+  if (r.status === "queued")
+    return (
+      <span className="flex items-center gap-1 font-semibold text-warn">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        <span>대기 중</span>
+      </span>
+    );
   if (r.status === "processing")
     return (
       <span className="flex items-center gap-1 font-semibold text-accent">

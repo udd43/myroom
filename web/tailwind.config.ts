@@ -21,6 +21,7 @@ const config: Config = {
         ok: "#14532d",
         warn: "#78350f",
         bad: "#7f1d1d",
+        danger: "#b91c1c",
         stage: "#111318",
       },
       fontFamily: {

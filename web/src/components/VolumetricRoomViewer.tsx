@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import * as GaussianSplats3D from "@mkkellogg/gaussian-splats-3d";
@@ -19,6 +19,9 @@ import {
   Waypoints,
 } from "lucide-react";
 import { CameraMode, FurnitureItem, ParsedSplatData, RoomItem, RoomPin } from "@/types/room";
+import { getAuthHeaders, resolveMediaUrl } from "@/lib/api";
+import { analyzeLayoutConflicts, snapFurniturePose } from "@/lib/floorplanCollision";
+import { useAppStore } from "@/store/useAppStore";
 import {
   encodeSplatArrayBuffer,
   generateSampleRoomSplatData,
@@ -53,6 +56,7 @@ interface Props {
   room: RoomItem;
   apiBaseUrl: string;
   compact?: boolean;
+  readOnly?: boolean;
   syncedCamera?: SyncedOrbitState | null;
   onCameraSyncChange?: (state: SyncedOrbitState) => void;
   onAddPin?: (pin: Omit<RoomPin, "id">) => void;
@@ -61,7 +65,7 @@ interface Props {
 }
 
 type ToolMode = "none" | "measure" | "pin" | "furniture" | "sun";
-export type SplatRenderMode = "surfel" | "mesh" | "wire" | "blob";
+export type SplatRenderMode = "surfel" | "mesh" | "wire" | "blob" | "spark";
 
 const FLOOR_Y = -1.25;
 
@@ -348,6 +352,7 @@ export default function VolumetricRoomViewer({
   room,
   apiBaseUrl,
   compact = false,
+  readOnly = false,
   syncedCamera = null,
   onCameraSyncChange,
   onAddPin,
@@ -390,7 +395,7 @@ export default function VolumetricRoomViewer({
   const markersRef = useRef<THREE.Group | null>(null);
   const furnGroupRef = useRef<THREE.Group | null>(null);
   const tcRef = useRef<TransformControls | null>(null);
-  const meshMapRef = useRef<Map<string, THREE.Mesh>>(new Map());
+  const meshMapRef = useRef<Map<string, THREE.Object3D>>(new Map());
   const gizmoDraggingRef = useRef(false);
 
   const [loading, setLoading] = useState(true);
@@ -420,6 +425,23 @@ export default function VolumetricRoomViewer({
   const [gizmoMode, setGizmoMode] = useState<"translate" | "rotate">("translate");
   const furnRef = useRef(furnitures);
   furnRef.current = furnitures;
+
+  const snapAngleDeg = useAppStore((s) => s.snapAngleDeg);
+  const snapToWalls = useAppStore((s) => s.snapToWalls);
+  const snapAngleRef = useRef(snapAngleDeg);
+  const snapWallsRef = useRef(snapToWalls);
+  snapAngleRef.current = snapAngleDeg;
+  snapWallsRef.current = snapToWalls;
+
+  const conflicts = useMemo(
+    () => (room.roomPlan ? analyzeLayoutConflicts(furnitures, room.roomPlan) : []),
+    [furnitures, room.roomPlan]
+  );
+  const conflictIds = useMemo(
+    () => new Set(conflicts.flatMap((c) => c.furnitureIds)),
+    [conflicts]
+  );
+  const sparkActive = renderMode === "spark" && !useAnisotropic3DGS;
 
   useEffect(() => {
     setFurnitures(room.furnitures || []);
@@ -562,24 +584,60 @@ export default function VolumetricRoomViewer({
     const camera = new THREE.PerspectiveCamera(56, w / h, 0.1, 60);
     camRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    const renderer = new THREE.WebGLRenderer({
+      antialias: !sparkActive,
+      powerPreference: "high-performance",
+    });
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     container.replaceChildren(renderer.domElement);
 
+    // @sparkjsdev/spark GPU SplatRenderer (.spz / .sog / .splat / .ply 통합 가속 렌더러)
+    let sparkCancelled = false;
+    let sparkRenderer: { dispose?: () => void } | null = null;
+    let sparkMesh: { dispose?: () => void } | null = null;
+    if (sparkActive) {
+      import("@sparkjsdev/spark")
+        .then((sparkMod) => {
+          if (sparkCancelled) return;
+          const sr = new sparkMod.SparkRenderer({ renderer, enable2DGS: true });
+          scene.add(sr as unknown as THREE.Object3D);
+          sparkRenderer = sr as unknown as { dispose?: () => void };
+
+          const remoteSrc =
+            room.spzUrl ||
+            (room.splatUrl && !room.splatUrl.startsWith("local://") ? room.splatUrl : null);
+          const resolvedRemote = remoteSrc ? resolveMediaUrl(apiBaseUrl, remoteSrc) : null;
+          const sm = resolvedRemote
+            ? new sparkMod.SplatMesh({
+                url: resolvedRemote,
+                requestHeader: getAuthHeaders(),
+              })
+            : new sparkMod.SplatMesh({
+                fileBytes: encodeSplatArrayBuffer(data),
+                fileType: sparkMod.SplatFileType.SPLAT,
+              });
+          scene.add(sm as unknown as THREE.Object3D);
+          sparkMesh = sm as unknown as { dispose?: () => void };
+        })
+        .catch(() => {
+          // WebGL2 / Spark 초기화 실패 시 기본 surfel/blob 폴백 유지
+        });
+    }
+
     // @mkkellogg/gaussian-splats-3d DropInViewer (타원 정렬 3DGS 모드 선택 시)
     let dropInViewer: any = null;
-    if (useAnisotropic3DGS && room.splatUrl) {
+    if (useAnisotropic3DGS && room.splatUrl && !room.splatUrl.startsWith("local://")) {
       try {
-        dropInViewer = new GaussianSplats3D.DropInViewer({
-          gpuAcceleratedSort: false,
-          sharedMemoryForWorkers: false,
-        });
-        const fullUrl = room.splatUrl.startsWith("http")
-          ? room.splatUrl
-          : `${apiBaseUrl}${room.splatUrl}`;
-        dropInViewer.addSplatScenes([{ path: fullUrl, splatAlphaRemovalThreshold: 5 }], false);
-        scene.add(dropInViewer);
+        const fullUrl = resolveMediaUrl(apiBaseUrl, room.splatUrl);
+        if (fullUrl) {
+          dropInViewer = new GaussianSplats3D.DropInViewer({
+            gpuAcceleratedSort: false,
+            sharedMemoryForWorkers: false,
+          });
+          dropInViewer.addSplatScenes([{ path: fullUrl, splatAlphaRemovalThreshold: 5 }], false);
+          scene.add(dropInViewer);
+        }
       } catch {
         dropInViewer = null;
       }
@@ -671,7 +729,7 @@ export default function VolumetricRoomViewer({
       creaseLines: null,
       wireLines: null,
       sharpPoints: null,
-      hasDropIn: Boolean(dropInViewer),
+      hasDropIn: Boolean(dropInViewer) || sparkActive,
       disposables,
     };
 
@@ -682,30 +740,35 @@ export default function VolumetricRoomViewer({
     markersRef.current = markers;
     furnGroupRef.current = furnGroup;
 
-    // TransformControls (3D 가구 배치 이동/회전 기즈모)
+    // TransformControls (3D 가구 배치 이동/회전 기즈모 + 각도/바닥/벽 스냅)
     const tc = new TransformControls(camera, renderer.domElement);
     tc.addEventListener("dragging-changed", (ev) => {
       gizmoDraggingRef.current = Boolean(ev.value);
       if (!ev.value && tc.object) {
         const fid = tc.object.userData.furnitureId as string | undefined;
         if (fid) {
-          const pos = tc.object.position;
-          const rotY = tc.object.rotation.y;
-          const next = furnRef.current.map((f) =>
-            f.id === fid
-              ? {
-                  ...f,
-                  position: [+pos.x.toFixed(2), +pos.y.toFixed(2), +pos.z.toFixed(2)] as [
-                    number,
-                    number,
-                    number,
-                  ],
-                  rotationY: +rotY.toFixed(3),
-                }
-              : f
-          );
-          setFurnitures(next);
-          onUpdateFurnitures?.(next);
+          const item = furnRef.current.find((f) => f.id === fid);
+          if (item) {
+            const snapped = snapFurniturePose(
+              item,
+              tc.object.position.x,
+              tc.object.position.y,
+              tc.object.position.z,
+              tc.object.rotation.y,
+              {
+                floorY: FLOOR_Y,
+                plan: room.roomPlan ?? undefined,
+                snapAngleDeg: snapAngleRef.current,
+                snapToFloor: true,
+                snapToWalls: snapWallsRef.current,
+              }
+            );
+            const next = furnRef.current.map((f) =>
+              f.id === fid ? { ...f, position: snapped.position, rotationY: snapped.rotationY } : f
+            );
+            setFurnitures(next);
+            onUpdateFurnitures?.(next);
+          }
         }
       }
     });
@@ -849,6 +912,9 @@ export default function VolumetricRoomViewer({
     animate();
 
     return () => {
+      sparkCancelled = true;
+      sparkMesh?.dispose?.();
+      sparkRenderer?.dispose?.();
       cancelAnimationFrame(raf);
       dom.removeEventListener("pointerdown", onDown);
       window.removeEventListener("pointermove", onMove);
@@ -872,7 +938,17 @@ export default function VolumetricRoomViewer({
       matListRef.current = [];
       renderer.dispose();
     };
-  }, [loading, cameraMode, room.id, room.pins, useAnisotropic3DGS, apiBaseUrl, room.splatUrl]);
+  }, [
+    loading,
+    cameraMode,
+    room.id,
+    room.pins,
+    useAnisotropic3DGS,
+    sparkActive,
+    apiBaseUrl,
+    room.splatUrl,
+    room.spzUrl,
+  ]);
 
   useEffect(() => {
     const layers = sceneLayersRef.current;
@@ -1008,8 +1084,8 @@ export default function VolumetricRoomViewer({
     const tc = tcRef.current;
     if (!fg || !tc) return;
     tc.detach();
-    meshMapRef.current = buildFurnitureGroup(fg, furnitures, selectedFurnId);
-    if (tool === "furniture" && selectedFurnId) {
+    meshMapRef.current = buildFurnitureGroup(fg, furnitures, selectedFurnId, conflictIds, FLOOR_Y);
+    if (!readOnly && tool === "furniture" && selectedFurnId) {
       const targetMesh = meshMapRef.current.get(selectedFurnId);
       if (targetMesh) {
         tc.setMode(gizmoMode);
@@ -1019,7 +1095,7 @@ export default function VolumetricRoomViewer({
         tc.attach(targetMesh);
       }
     }
-  }, [furnitures, selectedFurnId, tool, gizmoMode, loading]);
+  }, [furnitures, selectedFurnId, tool, gizmoMode, loading, conflictIds, readOnly]);
 
   useEffect(() => {
     const g = markersRef.current;
@@ -1044,6 +1120,7 @@ export default function VolumetricRoomViewer({
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (tool === "none" || tool === "sun" || gizmoDraggingRef.current) return;
     if (tool === "furniture") {
+      if (readOnly) return;
       const container = containerRef.current;
       const camera = camRef.current;
       const fg = furnGroupRef.current;
@@ -1057,9 +1134,10 @@ export default function VolumetricRoomViewer({
         ),
         camera
       );
-      const hits = raycaster.intersectObjects(fg.children, false);
+      const hits = raycaster.intersectObjects(fg.children, true);
       if (hits.length > 0) {
-        setSelectedFurnId(hits[0].object.userData.furnitureId as string);
+        const fid = hits[0].object.userData.furnitureId as string;
+        if (fid) setSelectedFurnId(fid);
       }
       return;
     }
@@ -1068,9 +1146,21 @@ export default function VolumetricRoomViewer({
     if (!pt) return;
     if (tool === "measure") {
       setMeasurePts((prev) => (prev.length >= 2 ? [pt] : [...prev, pt]));
-    } else if (tool === "pin") {
+    } else if (tool === "pin" && !readOnly) {
       setPendingPin([+pt.x.toFixed(2), +pt.y.toFixed(2), +pt.z.toFixed(2)]);
     }
+  };
+
+  const rotateSelected = (deltaDeg: number) => {
+    if (!selectedFurnId || readOnly) return;
+    const deltaRad = (deltaDeg * Math.PI) / 180;
+    const next = furnitures.map((f) =>
+      f.id === selectedFurnId
+        ? { ...f, rotationY: +((f.rotationY || 0) + deltaRad).toFixed(3) }
+        : f
+    );
+    setFurnitures(next);
+    onUpdateFurnitures?.(next);
   };
 
   const toggleTool = (t: Exclude<ToolMode, "none">) => {
@@ -1123,9 +1213,10 @@ export default function VolumetricRoomViewer({
           {(
             [
               { id: "surfel", label: "면 2D", icon: Shapes, title: "2DGS 접평면 Surfel (구/공 형태 제거)" },
+              { id: "spark", label: "Spark", icon: Sparkles, title: "@sparkjsdev/spark 고성능 .spz/.splat 깊이정렬 렌더러" },
               { id: "mesh", label: "선+면", icon: Grid3X3, title: "복셀 매니폴드 면 + 건축 구조선 (Mesh)" },
               { id: "wire", label: "점+선", icon: Waypoints, title: "꼭짓점 + 크리즈/격자 선 (Wireframe)" },
-              { id: "blob", label: "공(비교)", icon: Sparkles, title: "기존 등방성 구(공) 3DGS 비교" },
+              { id: "blob", label: "공(비교)", icon: Shapes, title: "기존 등방성 구(공) 3DGS 비교" },
             ] as const
           ).map(({ id, label, icon: Icon, title }) => (
             <button
@@ -1150,15 +1241,19 @@ export default function VolumetricRoomViewer({
             <button onClick={() => toggleTool("measure")} className={`vbtn ${tool === "measure" ? "vbtn-on" : ""}`}>
               <Ruler className="h-3.5 w-3.5" /> 치수
             </button>
-            <button onClick={() => toggleTool("pin")} className={`vbtn ${tool === "pin" ? "vbtn-on" : ""}`}>
-              <MapPin className="h-3.5 w-3.5" /> 핀
-            </button>
-            <button
-              onClick={() => toggleTool("furniture")}
-              className={`vbtn ${tool === "furniture" ? "vbtn-on" : ""}`}
-            >
-              <Box className="h-3.5 w-3.5" /> 가구 배치 ({furnitures.length})
-            </button>
+            {!readOnly && (
+              <>
+                <button onClick={() => toggleTool("pin")} className={`vbtn ${tool === "pin" ? "vbtn-on" : ""}`}>
+                  <MapPin className="h-3.5 w-3.5" /> 핀
+                </button>
+                <button
+                  onClick={() => toggleTool("furniture")}
+                  className={`vbtn ${tool === "furniture" ? "vbtn-on" : ""}`}
+                >
+                  <Box className="h-3.5 w-3.5" /> 가구 배치 ({furnitures.length})
+                </button>
+              </>
+            )}
             <button
               onClick={() => setUseAnisotropic3DGS((v) => !v)}
               className={`vbtn hidden sm:flex ${useAnisotropic3DGS ? "vbtn-on" : ""}`}
@@ -1182,7 +1277,7 @@ export default function VolumetricRoomViewer({
             playing={sunPlaying}
             onChangeParams={updateSunParams}
             onTogglePlay={toggleSunPlay}
-            onUpdateRoomLocationAndDirection={(patch) => onUpdateRoom?.(patch)}
+            onUpdateRoomLocationAndDirection={readOnly ? undefined : (patch) => onUpdateRoom?.(patch)}
             onClose={() => setTool("none")}
           />
         </div>
@@ -1194,9 +1289,11 @@ export default function VolumetricRoomViewer({
           hasStart={measurePts.length === 1}
         />
       )}
-      {tool === "pin" && (
+      {!readOnly && tool === "pin" && (
         <PinPrompt
           position={pendingPin}
+          roomId={room.id}
+          apiBaseUrl={apiBaseUrl}
           onSave={(pin) => {
             onAddPin?.(pin);
             setPendingPin(null);
@@ -1204,13 +1301,15 @@ export default function VolumetricRoomViewer({
           }}
         />
       )}
-      {tool === "furniture" && (
+      {!readOnly && tool === "furniture" && (
         <FurniturePaletteBar
           furnitures={furnitures}
           selectedId={selectedFurnId}
           gizmoMode={gizmoMode}
+          conflicts={conflicts}
           onChangeGizmoMode={setGizmoMode}
           onSelect={setSelectedFurnId}
+          onRotateSelected={rotateSelected}
           onAdd={(item) => {
             const next = [...furnitures, item];
             setFurnitures(next);
@@ -1235,6 +1334,7 @@ export default function VolumetricRoomViewer({
 
       <PinLabels
         pins={projectedPins}
+        apiBaseUrl={apiBaseUrl}
         onFocus={(pin) => {
           orbitRef.current.target.set(...pin.position);
           orbitRef.current.radius = 3.2;
@@ -1266,13 +1366,15 @@ export default function VolumetricRoomViewer({
           <span>
             {useAnisotropic3DGS
               ? "3DGS 정렬"
-              : renderMode === "surfel"
-                ? "2D Surfel 면"
-                : renderMode === "mesh"
-                  ? "선+면 Mesh"
-                  : renderMode === "wire"
-                    ? "점+선 Wire"
-                    : "기존 공 3DGS"}
+              : renderMode === "spark"
+                ? "Spark 3DGS"
+                : renderMode === "surfel"
+                  ? "2D Surfel 면"
+                  : renderMode === "mesh"
+                    ? "선+면 Mesh"
+                    : renderMode === "wire"
+                      ? "점+선 Wire"
+                      : "기존 공 3DGS"}
           </span>
           {!compact && (
             <>
@@ -1284,7 +1386,11 @@ export default function VolumetricRoomViewer({
                 title="위치·방위 기반 채광 설정 열기"
               >
                 {sunState.location.label} · {room.direction || "남향"} ·{" "}
-                {sunState.isDirectSunlight ? "직사광" : "간접광"}
+                {sunState.isDirectSunlight
+                  ? "직사광"
+                  : sunState.blockedByBuilding
+                    ? `건물 가림(${sunState.blockedByBuilding.name || "주변건물"})`
+                    : "간접광"}
               </button>
             </>
           )}

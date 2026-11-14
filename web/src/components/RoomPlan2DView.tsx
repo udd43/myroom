@@ -1,8 +1,10 @@
 "use client";
 
 import React, { useMemo, useRef, useState } from "react";
-import { Download, LocateFixed, Pause, Play, Sun } from "lucide-react";
-import { RoomItem, RoomPlanData } from "@/types/room";
+import { AlertTriangle, Download, LocateFixed, Pause, Play, RotateCw, Sun, Trash2 } from "lucide-react";
+import { FurnitureItem, RoomItem, RoomPlanData } from "@/types/room";
+import { analyzeLayoutConflicts, snapFurniturePose } from "@/lib/floorplanCollision";
+import { useAppStore } from "@/store/useAppStore";
 import {
   analyzeDailySunlight,
   computeWindowFloorSunPolygons,
@@ -19,7 +21,9 @@ import { useSunlightState } from "@/hooks/useSunlightState";
 
 interface Props {
   room: RoomItem;
+  readOnly?: boolean;
   onUpdateRoom?: (patch: Partial<RoomItem>) => void;
+  onUpdateFurnitures?: (items: FurnitureItem[]) => void;
 }
 
 const FALLBACK_PLAN: RoomPlanData = {
@@ -40,11 +44,44 @@ const FALLBACK_PLAN: RoomPlanData = {
   objects: [],
 };
 
-export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
+export default function RoomPlan2DView({
+  room,
+  readOnly = false,
+  onUpdateRoom,
+  onUpdateFurnitures,
+}: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [locating, setLocating] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [dragPos, setDragPos] = useState<{ id: string; x: number; z: number } | null>(null);
+  const dragRef = useRef<{
+    id: string;
+    startClientX: number;
+    startClientY: number;
+    origX: number;
+    origZ: number;
+  } | null>(null);
+
+  const snapAngleDeg = useAppStore((s) => s.snapAngleDeg);
+  const snapToWalls = useAppStore((s) => s.snapToWalls);
+
   const plan = room.roomPlan || FALLBACK_PLAN;
   const furnitures = room.furnitures || [];
+  const displayedFurnitures = useMemo(() => {
+    if (!dragPos) return furnitures;
+    return furnitures.map((f) =>
+      f.id === dragPos.id ? { ...f, position: [dragPos.x, f.position[1], dragPos.z] as [number, number, number] } : f
+    );
+  }, [furnitures, dragPos]);
+
+  const conflicts = useMemo(
+    () => analyzeLayoutConflicts(displayedFurnitures, plan),
+    [displayedFurnitures, plan]
+  );
+  const conflictIds = useMemo(
+    () => new Set(conflicts.flatMap((c) => c.furnitureIds)),
+    [conflicts]
+  );
   const { params, dayOfYear, sunState, playing, togglePlay, updateParams } = useSunlightState(room, true);
 
   const requestGps = async () => {
@@ -90,6 +127,66 @@ export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const clientDeltaToMeters = (dxPx: number, dyPx: number): [number, number] => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return [dxPx / scale, dyPx / scale];
+    const svgDx = (dxPx / rect.width) * wPx;
+    const svgDy = (dyPx / rect.height) * hPx;
+    return [svgDx / scale, svgDy / scale];
+  };
+
+  const handleSvgPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const [dxM, dzM] = clientDeltaToMeters(e.clientX - drag.startClientX, e.clientY - drag.startClientY);
+    setDragPos({
+      id: drag.id,
+      x: +(drag.origX + dxM).toFixed(2),
+      z: +(drag.origZ + dzM).toFixed(2),
+    });
+  };
+
+  const handleSvgPointerUp = () => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag || !dragPos || !onUpdateFurnitures) {
+      setDragPos(null);
+      return;
+    }
+    const target = furnitures.find((f) => f.id === drag.id);
+    setDragPos(null);
+    if (!target) return;
+    const snapped = snapFurniturePose(target, dragPos.x, target.position[1], dragPos.z, target.rotationY, {
+      floorY: -1.25,
+      plan,
+      snapAngleDeg,
+      snapToFloor: false,
+      snapToWalls,
+    });
+    const next = furnitures.map((f) =>
+      f.id === drag.id ? { ...f, position: snapped.position, rotationY: snapped.rotationY } : f
+    );
+    onUpdateFurnitures(next);
+  };
+
+  const rotateSelected2D = (deltaDeg: number) => {
+    if (!selectedId || !onUpdateFurnitures || readOnly) return;
+    const next = furnitures.map((f) =>
+      f.id === selectedId
+        ? { ...f, rotationY: +((f.rotationY || 0) + (deltaDeg * Math.PI) / 180).toFixed(3) }
+        : f
+    );
+    onUpdateFurnitures(next);
+  };
+
+  const deleteSelected2D = () => {
+    if (!selectedId || !onUpdateFurnitures || readOnly) return;
+    onUpdateFurnitures(furnitures.filter((f) => f.id !== selectedId));
+    setSelectedId(null);
+  };
+
+  const selectedFurniture = furnitures.find((f) => f.id === selectedId) ?? null;
 
   return (
     <div className="relative flex h-full min-h-[380px] w-full flex-col justify-between border border-ink bg-card p-4">
@@ -237,11 +334,39 @@ export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
         </span>
       </div>
 
-      <div className="my-2 flex flex-1 items-center justify-center overflow-auto bg-paper p-2">
+      <div className="my-2 flex flex-1 flex-col items-center justify-center overflow-auto bg-paper p-2">
+        {!readOnly && selectedFurniture && onUpdateFurnitures && (
+          <div className="mb-2 flex w-full max-w-[680px] flex-wrap items-center justify-between gap-2 border border-ink bg-card px-2.5 py-1.5 text-xs">
+            <span className="font-semibold text-ink">
+              선택됨: {selectedFurniture.name} ({Math.round(selectedFurniture.widthM * 100)}×
+              {Math.round(selectedFurniture.depthM * 100)}cm ·{" "}
+              {Math.round((((selectedFurniture.rotationY || 0) * 180) / Math.PI) % 360)}°)
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button type="button" onClick={() => rotateSelected2D(15)} className="btn-line py-0.5 text-xs">
+                <RotateCw className="h-3 w-3" /> +15°
+              </button>
+              <button type="button" onClick={() => rotateSelected2D(90)} className="btn-line py-0.5 text-xs">
+                <RotateCw className="h-3 w-3" /> +90°
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelected2D}
+                className="btn-line py-0.5 text-xs text-danger hover:border-danger"
+              >
+                <Trash2 className="h-3 w-3" /> 삭제
+              </button>
+            </div>
+          </div>
+        )}
         <svg
           ref={svgRef}
           viewBox={`0 0 ${wPx} ${hPx}`}
-          className="max-h-[460px] w-full max-w-[680px]"
+          onPointerMove={handleSvgPointerMove}
+          onPointerUp={handleSvgPointerUp}
+          onPointerLeave={handleSvgPointerUp}
+          onClick={() => setSelectedId(null)}
+          className="max-h-[460px] w-full max-w-[680px] touch-none"
           xmlns="http://www.w3.org/2000/svg"
         >
           <defs>
@@ -307,24 +432,47 @@ export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
             );
           })}
 
-          {/* 사용자가 3D로 배치한 내 가구 (오렌지/블루 강조 표시) */}
-          {furnitures.map((f) => {
+          {/* 사용자가 3D/2D로 배치한 내 가구 (실시간 드래그·충돌 강조) */}
+          {displayedFurnitures.map((f) => {
             const fw = f.widthM * scale;
             const fd = f.depthM * scale;
             const fx = toX(f.position[0]);
             const fy = toY(f.position[2]);
             const deg = ((f.rotationY || 0) * 180) / Math.PI;
+            const hasConflict = conflictIds.has(f.id);
+            const isSel = selectedId === f.id;
+            const strokeCol = hasConflict ? "#dc2626" : isSel ? "#b93800" : f.color || "#0284c7";
             return (
-              <g key={f.id} transform={`rotate(${deg}, ${fx}, ${fy})`}>
+              <g
+                key={f.id}
+                transform={`rotate(${deg}, ${fx}, ${fy})`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!readOnly) setSelectedId(f.id);
+                }}
+                onPointerDown={(e) => {
+                  if (readOnly || !onUpdateFurnitures) return;
+                  e.stopPropagation();
+                  setSelectedId(f.id);
+                  dragRef.current = {
+                    id: f.id,
+                    startClientX: e.clientX,
+                    startClientY: e.clientY,
+                    origX: f.position[0],
+                    origZ: f.position[2],
+                  };
+                }}
+                style={{ cursor: !readOnly && onUpdateFurnitures ? "grab" : "default" }}
+              >
                 <rect
                   x={fx - fw / 2}
                   y={fy - fd / 2}
                   width={fw}
                   height={fd}
-                  fill={f.color || "#0284c7"}
-                  fillOpacity="0.22"
-                  stroke={f.color || "#0284c7"}
-                  strokeWidth="2"
+                  fill={hasConflict ? "#ef4444" : f.color || "#0284c7"}
+                  fillOpacity={hasConflict ? "0.32" : isSel ? "0.3" : "0.22"}
+                  stroke={strokeCol}
+                  strokeWidth={isSel || hasConflict ? "2.6" : "2"}
                 />
                 <text
                   x={fx}
@@ -342,7 +490,7 @@ export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
                   y={fy + 9}
                   textAnchor="middle"
                   dominantBaseline="middle"
-                  fill="#334155"
+                  fill={hasConflict ? "#991b1b" : "#334155"}
                   fontSize="9"
                   fontFamily="monospace"
                 >
@@ -450,6 +598,66 @@ export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
               </g>
             );
           })}
+
+          {/* 주변 건물 방위·높이 차광 칩 (VWorld / 수동 입력) */}
+          {(room.neighborBuildings || []).map((nb) => {
+            const azimuthDeg = (Math.atan2(nb.xM, -nb.zM) * 180) / Math.PI;
+            const rad = ((azimuthDeg + deltaDeg) * Math.PI) / 180;
+            const ringR = Math.min(cx - 20, cz - 18);
+            const nx = cx + Math.sin(rad) * ringR;
+            const ny = cz - Math.cos(rad) * ringR;
+            const isBlocking = sunState.blockedByBuilding?.id === nb.id;
+            return (
+              <g key={nb.id}>
+                <rect
+                  x={nx - 34}
+                  y={ny - 11}
+                  width={68}
+                  height={22}
+                  fill={isBlocking ? "#b91c1c" : "#1e293b"}
+                  fillOpacity="0.9"
+                  stroke={isBlocking ? "#fca5a5" : "#64748b"}
+                  strokeWidth="1"
+                />
+                <text
+                  x={nx}
+                  y={ny + 1}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fill="#ffffff"
+                  fontSize="8.5"
+                  fontFamily="monospace"
+                >
+                  {(nb.name || "건물").slice(0, 5)} {Math.round(nb.heightM)}m
+                </text>
+              </g>
+            );
+          })}
+
+          {/* 문 열림/통로 폭 충돌 경고 마커 */}
+          {conflicts.map((c) => (
+            <g key={`mk-${c.id}`}>
+              <circle
+                cx={toX(c.xM)}
+                cy={toY(c.zM)}
+                r="8"
+                fill={c.severity === "error" ? "#dc2626" : "#d97706"}
+                stroke="#ffffff"
+                strokeWidth="1.5"
+              />
+              <text
+                x={toX(c.xM)}
+                y={toY(c.zM) + 0.5}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                fill="#ffffff"
+                fontSize="10"
+                fontWeight="bold"
+              >
+                !
+              </text>
+            </g>
+          ))}
 
           {/* 현재 태양 위치 및 입사 방향 가이드 (고도 > 0일 때) */}
           {params.enabled &&
@@ -561,6 +769,35 @@ export default function RoomPlan2DView({ room, onUpdateRoom }: Props) {
           })()}
         </svg>
       </div>
+
+      {conflicts.length > 0 && (
+        <div className="mb-2 border border-danger/50 bg-red-50 px-3 py-2 text-xs text-danger">
+          <div className="mb-1 flex items-center gap-1.5 font-bold">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            <span>배치·통로·문 회전 주의사항 ({conflicts.length}건)</span>
+          </div>
+          <ul className="space-y-0.5 text-[11px] text-red-900">
+            {conflicts.map((c) => (
+              <li key={c.id}>· {c.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {sunState.blockedByBuilding && (
+        <div className="mb-2 border border-amber-600/40 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
+          현재 시각({formatMinutesToHHMM(params.minutesOfDay)}) 태양 고도{" "}
+          <span className="num font-semibold">{sunState.world.altitudeDeg.toFixed(1)}°</span>가 주변 건물{" "}
+          <strong>{sunState.blockedByBuilding.name || "인접 건물"}</strong>(높이{" "}
+          {Math.round(sunState.blockedByBuilding.heightM)}m, 거리{" "}
+          {Math.round(
+            sunState.blockedByBuilding.distanceM ??
+              Math.hypot(sunState.blockedByBuilding.xM, sunState.blockedByBuilding.zM)
+          )}
+          m)
+          에 가려져 <strong>그늘</strong>이 집니다.
+        </div>
+      )}
 
       {/* 시간대별(06~19시) 일조 막대 스트립 */}
       <div className="mb-2 border border-line bg-paper p-2.5 text-xs">

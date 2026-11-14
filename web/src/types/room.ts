@@ -1,4 +1,13 @@
 export type CheckGrade = "good" | "normal" | "bad";
+export type CameraMode = "orbit" | "dollhouse" | "walkthrough";
+
+export interface ParsedSplatData {
+  count: number;
+  positions: Float32Array;
+  scales: Float32Array;
+  colors: Float32Array;
+  quats: Float32Array;
+}
 
 export interface RoomChecklist {
   sunlight: CheckGrade;
@@ -9,11 +18,33 @@ export interface RoomChecklist {
   parking: CheckGrade;
 }
 
+export type PinStage = "viewing" | "move_in" | "move_out" | "defect";
+
 export interface RoomPin {
   id: string;
   label: string;
-  category: "check" | "size" | "info" | "issue";
+  category: "check" | "size" | "issue" | "info";
   position: [number, number, number];
+  note?: string;
+  mediaUrl?: string;
+  mediaType?: "image" | "video" | "audio";
+  noiseDb?: number;
+  stage?: PinStage;
+  createdAt?: string;
+}
+
+export type TimelineStage = "viewing" | "contract" | "move_in" | "living" | "move_out";
+
+export interface TimelineEvent {
+  id: string;
+  stage: TimelineStage;
+  title: string;
+  note?: string;
+  mediaUrl?: string;
+  mediaType?: "image" | "video" | "audio";
+  noiseDb?: number;
+  pinIds?: string[];
+  createdAt: string;
 }
 
 export interface FurnitureItem {
@@ -23,7 +54,7 @@ export interface FurnitureItem {
   depthM: number;
   heightM: number;
   position: [number, number, number];
-  rotationY: number; // 라디안 또는 도(degree)
+  rotationY: number;
   color: string;
 }
 
@@ -39,7 +70,7 @@ export interface RoomPlanWall {
 
 export interface RoomPlanOpening {
   id: string;
-  type: "door" | "window";
+  type: "window" | "door";
   x: number;
   z: number;
   widthM: number;
@@ -67,11 +98,115 @@ export interface RoomPlanData {
   objects: RoomPlanObject[];
 }
 
+export interface NeighborBuilding {
+  id: string;
+  name: string;
+  xM: number; // +X East relative to target room (m)
+  zM: number; // +Z South relative to target room (m)
+  widthM: number;
+  depthM: number;
+  heightM: number;
+  floors?: number;
+  distanceM?: number;
+  source?: "vworld" | "manual";
+}
+
+export interface BjdongMeta {
+  admCd?: string;
+  sigunguCd: string;
+  bjdongCd: string;
+  bun: string;
+  ji: string;
+  platGbCd?: string;
+}
+
+export interface BuildingRegistryInfo {
+  configured: boolean;
+  found?: boolean;
+  error?: string;
+  buildingName?: string;
+  mainPurpose?: string;
+  etcPurpose?: string;
+  structureName?: string;
+  approvalDate?: string;
+  approvalYear?: number | null;
+  groundFloors?: number;
+  undergroundFloors?: number;
+  householdCount?: number;
+  totalAreaSqm?: number;
+  floorAreaRatioPct?: number;
+  buildingCoveragePct?: number;
+  isNeighborhoodLiving?: boolean;
+  hasViolation?: boolean;
+  warnings?: string[];
+}
+
+export interface RentTradeRow {
+  kind: string;
+  name: string;
+  umdNm: string;
+  areaSqm: number;
+  deposit: number;
+  monthlyRent: number;
+  equivMonthly: number;
+  dealDate: string;
+  floor: number;
+}
+
+export interface RentMarketInfo {
+  configured: boolean;
+  sampleCount?: number;
+  medianEquivMonthly?: number;
+  targetEquivMonthly?: number;
+  diffPct?: number;
+  verdict?: string;
+  conversionRatePct?: number;
+  recentTrades?: RentTradeRow[];
+  error?: string;
+}
+
+export interface NearbyPoiItem {
+  name: string;
+  categoryDetail: string;
+  distanceM: number;
+  walkMinutes: number;
+  latitude: number;
+  longitude: number;
+}
+
+export interface NearbyPoiInfo {
+  configured: boolean;
+  subways: NearbyPoiItem[];
+  convenienceStores: NearbyPoiItem[];
+  marts: NearbyPoiItem[];
+}
+
+export interface CommuteInfo {
+  configured: boolean;
+  provider: string;
+  isEstimate: boolean;
+  destLabel: string;
+  straightKm: number;
+  totalMinutes: number;
+  walkMinutes?: number;
+  transfers?: number;
+  fareWon?: number;
+  routeSummary: string;
+}
+
+export interface PropertyIntel {
+  buildingRegistry?: BuildingRegistryInfo;
+  rentMarket?: RentMarketInfo;
+  nearbyPoi?: NearbyPoiInfo;
+  commute?: CommuteInfo;
+  fetchedAt?: string;
+}
+
 export interface RoomItem {
   id: string;
   title: string;
   address: string;
-  dealType: "월세" | "전세" | "매매" | string;
+  dealType: string;
   deposit: number;
   monthlyRent: number;
   maintenanceFee: number;
@@ -79,43 +214,40 @@ export interface RoomItem {
   roomStructure: string;
   floor: string;
   direction: string;
+  latitude?: number;
+  longitude?: number;
+  locationLabel?: string;
+  sunHeadingOffsetDeg?: number;
   MoveInDate?: string;
-  rating: number;
+  rating?: number;
   pros: string;
   cons: string;
   memo: string;
   checklist: RoomChecklist;
   pins: RoomPin[];
-  furnitures?: FurnitureItem[];
-  roomPlan?: RoomPlanData | null;
-  status: "empty" | "processing" | "ready" | "error";
+  furnitures: FurnitureItem[];
+  roomPlan?: RoomPlanData;
+  neighborBuildings?: NeighborBuilding[];
+  bjdongMeta?: BjdongMeta | null;
+  propertyIntel?: PropertyIntel | null;
+  timeline?: TimelineEvent[];
+  shareToken?: string | null;
+  status: "idle" | "queued" | "processing" | "ready" | "error";
   progress: number;
   stageText: string;
   splatUrl: string | null;
+  spzUrl?: string | null;
   plyUrl: string | null;
-  modelUrl?: string | null; // LiDAR GLB
-  usdzUrl?: string | null; // Apple RoomPlan USDZ (AR Quick Look)
+  modelUrl?: string | null;
+  usdzUrl?: string | null;
   videoUrl: string | null;
   thumbUrl: string | null;
   splatCount: number;
   engine: string | null;
   createdAt: string;
+  updatedAt?: string;
   localSplatPreset?: "yeoksam" | "yeonnam";
-  latitude?: number | null;
-  longitude?: number | null;
-  locationLabel?: string | null;
-  sunHeadingOffsetDeg?: number | null;
 }
-
-export interface ParsedSplatData {
-  count: number;
-  positions: Float32Array;
-  scales: Float32Array;
-  colors: Float32Array;
-  quats: Float32Array; // normalized w, x, y, z (count * 4)
-}
-
-export type CameraMode = "orbit" | "dollhouse" | "walkthrough";
 
 export type NewRoomMeta = Pick<
   RoomItem,
@@ -136,7 +268,34 @@ export type NewRoomMeta = Pick<
   | "latitude"
   | "longitude"
   | "locationLabel"
+  | "bjdongMeta"
+  | "neighborBuildings"
+  | "propertyIntel"
 >;
 
 export type UploadKind = "video" | "3d" | "none";
 export type Quality = "high" | "fast";
+
+export interface AuthStatusResponse {
+  authEnabled: boolean;
+  authenticated: boolean;
+  maxUploadMb: number;
+  r2Enabled: boolean;
+}
+
+export interface IntegrationStatusResponse {
+  authEnabled: boolean;
+  r2Enabled: boolean;
+  maxUploadMb: number;
+  maxConcurrentJobs: number;
+  apis: {
+    juso: boolean;
+    dataGoKrBuilding: boolean;
+    dataGoKrRent: boolean;
+    kakaoLocal: boolean;
+    transit: boolean;
+    odsay: boolean;
+    kakaoMobilityTransit: boolean;
+    vworld3d: boolean;
+  };
+}

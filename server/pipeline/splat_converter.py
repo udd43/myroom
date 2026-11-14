@@ -1,8 +1,10 @@
+import gzip
 import struct
 from pathlib import Path
 import numpy as np
 
 SH_C0 = 0.28209479177387814
+SPZ_MAGIC = 0x5053474E  # "NGSP" little-endian
 
 
 def write_splat_file(
@@ -66,6 +68,82 @@ def write_splat_file(
         f.write(buffer.tobytes())
 
     return n
+
+
+def write_spz_file(
+    output_path: Path,
+    positions: np.ndarray,
+    scales: np.ndarray,
+    colors_rgba: np.ndarray,
+    quats: np.ndarray | None = None,
+    fractional_bits: int = 12,
+) -> int:
+    """
+    Niantic/Scaniverse SPZ v2 gzip 포맷으로 75~88% 압축 저장합니다.
+    (@sparkjsdev/spark 뷰어 및 Three.js WebAssembly 로더와 100% 호환)
+    """
+    n = len(positions)
+    if n == 0:
+        raise ValueError("No points to write to .spz file")
+
+    pos = np.asarray(positions, dtype=np.float32).reshape(n, 3)
+    sc = np.clip(np.asarray(scales, dtype=np.float32).reshape(n, 3), 1e-6, 100.0)
+    rgba = np.clip(np.asarray(colors_rgba), 0, 255).astype(np.uint8).reshape(n, 4)
+
+    if quats is None:
+        q_wxyz = np.zeros((n, 4), dtype=np.float32)
+        q_wxyz[:, 0] = 1.0
+    else:
+        q_wxyz = np.asarray(quats, dtype=np.float32).reshape(n, 4)
+        norms = np.linalg.norm(q_wxyz, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        q_wxyz = q_wxyz / norms
+    # SPZ v2는 w >= 0 인 정규화 쿼터니언의 (x, y, z)만 8-bit로 저장
+    flip = q_wxyz[:, 0] < 0
+    if np.any(flip):
+        q_wxyz = q_wxyz.copy()
+        q_wxyz[flip] = -q_wxyz[flip]
+
+    scale_factor = float(1 << fractional_bits)
+    pos_q = np.clip(np.rint(pos * scale_factor), -8388608, 8388607).astype("<i4")
+    pos_bytes = pos_q.view(np.uint8).reshape(n, 3, 4)[:, :, :3].tobytes()
+
+    alphas_bytes = rgba[:, 3].tobytes()
+
+    rgb_float = rgba[:, :3].astype(np.float32) / 255.0
+    col_u8 = np.clip(np.rint(((rgb_float - 0.5) / SH_C0 * 0.15 + 0.5) * 255.0), 0, 255).astype(np.uint8)
+    colors_bytes = col_u8.tobytes()
+
+    sc_u8 = np.clip(np.rint((np.log(sc) + 10.0) * 16.0), 0, 255).astype(np.uint8)
+    scales_bytes = sc_u8.tobytes()
+
+    rot_u8 = np.clip(np.rint(q_wxyz[:, 1:4] * 127.5 + 127.5), 0, 255).astype(np.uint8)
+    rot_bytes = rot_u8.tobytes()
+
+    header = struct.pack("<IIIBBBB", SPZ_MAGIC, 2, n, 0, fractional_bits, 0, 0)
+    raw = header + pos_bytes + alphas_bytes + colors_bytes + scales_bytes + rot_bytes
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(gzip.compress(raw, compresslevel=6))
+    return n
+
+
+def convert_splat_to_spz(splat_path: Path, spz_path: Path) -> int:
+    """기존 32-byte .splat 파일을 읽어 압축 .spz v2 파일로 변환합니다."""
+    dtype = np.dtype(
+        [
+            ("pos", "<f4", (3,)),
+            ("scale", "<f4", (3,)),
+            ("color", "u1", (4,)),
+            ("rot", "u1", (4,)),
+        ]
+    )
+    data = np.fromfile(splat_path, dtype=dtype)
+    if len(data) == 0:
+        raise ValueError(f"Empty .splat file: {splat_path}")
+    quats = (data["rot"].astype(np.float32) - 128.0) / 128.0
+    return write_spz_file(spz_path, data["pos"], data["scale"], data["color"], quats=quats)
 
 
 def write_ply_file(
