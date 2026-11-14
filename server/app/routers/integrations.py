@@ -99,3 +99,4 @@ async def get_vworld_buildings(
     _auth: None = Depends(require_auth),
 ):
     return fetch_vworld_nearby_buildings(lat, lng, radius_m=radiusM)
+
