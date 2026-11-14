@@ -10,6 +10,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import urllib.error
 import uuid
 from pathlib import Path
 from typing import Any
@@ -355,6 +356,55 @@ class ServerBackendTests(unittest.TestCase):
             )
             self.assertEqual(status, 400)
         security.reset_rate_limiter()
+
+    def test_vworld_502_retry_and_http_fallback(self) -> None:
+        calls: list[str] = []
+        vworld_ok = json.dumps(
+            {
+                "response": {
+                    "status": "OK",
+                    "result": {
+                        "featureCollection": {
+                            "features": [
+                                {
+                                    "id": "LT_C_SPBD.1",
+                                    "properties": {"BLD_NM": "앞빌딩", "GRO_FLO_CO": 6},
+                                    "geometry": {
+                                        "coordinates": [
+                                            [
+                                                [127.0365, 37.5002],
+                                                [127.0366, 37.5002],
+                                                [127.0366, 37.5003],
+                                                [127.0365, 37.5003],
+                                            ]
+                                        ]
+                                    },
+                                }
+                            ]
+                        }
+                    },
+                }
+            }
+        )
+
+        def fake_get(url: str, headers: Any = None, timeout: float = 10.0) -> str:
+            calls.append(url)
+            if len(calls) <= 2:
+                raise urllib.error.HTTPError(url, 502, "Bad Gateway", {}, None)  # type: ignore[arg-type]
+            return vworld_ok
+
+        with (
+            patch.object(config, "VWORLD_API_KEY", "test-vworld-key"),
+            patch.object(config, "VWORLD_DOMAIN", "myroom-api-jj.duckdns.org"),
+            patch.object(korea_apis, "_http_get_raw", side_effect=fake_get),
+            patch("time.sleep", return_value=None),
+        ):
+            res = korea_apis.fetch_vworld_nearby_buildings(37.5000, 127.0365, 95.0)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(calls[0].startswith("https://api.vworld.kr/"))
+        self.assertTrue(calls[2].startswith("http://api.vworld.kr/"))
+        self.assertEqual(len(res["buildings"]), 1)
+        self.assertEqual(res["buildings"][0]["name"], "앞빌딩")
 
 
 if __name__ == "__main__":

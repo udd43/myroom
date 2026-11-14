@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import math
 import statistics
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -587,13 +588,40 @@ def fetch_vworld_nearby_buildings(latitude: float, longitude: float, radius_m: f
             "domain": config.VWORLD_DOMAIN or "localhost",
             "format": "json",
             "crs": "EPSG:4326",
-            "size": 80,
+            "size": 45,
             "geomFilter": bbox,
         }
     )
-    url = f"https://api.vworld.kr/req/data?{qs}"
+    endpoints = [
+        f"https://api.vworld.kr/req/data?{qs}",
+        f"https://api.vworld.kr/req/data?{qs}",
+        f"http://api.vworld.kr/req/data?{qs}",
+    ]
+    raw_body: str | None = None
+    last_exc: Exception | None = None
+    for idx, url in enumerate(endpoints):
+        try:
+            raw_body = _http_get_raw(url, timeout=14.0)
+            break
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code not in (502, 503, 504) or idx == len(endpoints) - 1:
+                break
+            time.sleep(0.5)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_exc = exc
+            if idx == len(endpoints) - 1:
+                break
+            time.sleep(0.5)
+        except Exception as exc:
+            last_exc = exc
+            break
+
+    if raw_body is None:
+        return {"configured": True, "buildings": [], "error": f"브이월드 3D 건물 조회 오류: {last_exc}"}
+
     try:
-        data = json.loads(_http_get_raw(url, timeout=10.0))
+        data = json.loads(raw_body)
         resp = data.get("response") or {}
         if resp.get("status") != "OK":
             err = (resp.get("error") or {}).get("text") or resp.get("status") or "VWorld API 오류"
@@ -651,3 +679,4 @@ def fetch_vworld_nearby_buildings(latitude: float, longitude: float, radius_m: f
         return {"configured": True, "buildings": buildings[:24]}
     except Exception as exc:
         return {"configured": True, "buildings": [], "error": f"브이월드 3D 건물 조회 오류: {exc}"}
+
