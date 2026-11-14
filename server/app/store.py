@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .config import DATA_FILE, DB_FILE, TIMEZONE_SUFFIX
+from .config import DATA_FILE, DB_FILE, TIMEZONE_SUFFIX, is_safe_id
 
 Room = dict[str, Any]
 
@@ -183,7 +183,7 @@ class RoomStore:
                 now = _now_iso()
                 for room in rooms:
                     rid = str(room.get("id") or "").strip()
-                    if not rid:
+                    if not rid or not is_safe_id(rid):
                         continue
                     existing = conn.execute("SELECT id FROM rooms WHERE id = ?", (rid,)).fetchone()
                     if existing:

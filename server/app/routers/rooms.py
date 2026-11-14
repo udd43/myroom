@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from .. import config
 from ..schemas import RoomCreate, RoomPinCreate, RoomSyncRequest, RoomUpdate, TimelineEventCreate
-from ..security import require_auth
+from ..security import require_auth, safe_room_storage_dir, validate_room_id
 from ..store import room_store
 
 router = APIRouter(prefix="/api", tags=["rooms"])
@@ -28,6 +28,7 @@ async def list_rooms(_auth: None = Depends(require_auth)) -> list[dict[str, Any]
 
 @router.get("/rooms/{room_id}")
 async def get_room(room_id: str, _auth: None = Depends(require_auth)) -> dict[str, Any]:
+    validate_room_id(room_id)
     room = room_store.get(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -69,6 +70,7 @@ async def sync_local_rooms(payload: RoomSyncRequest, _auth: None = Depends(requi
 
 @router.patch("/rooms/{room_id}")
 async def update_room(room_id: str, payload: RoomUpdate, _auth: None = Depends(require_auth)) -> dict[str, Any]:
+    validate_room_id(room_id)
     updates = payload.model_dump(exclude_unset=True)
     updated = room_store.update(room_id, updates)
     if not updated:
@@ -78,10 +80,10 @@ async def update_room(room_id: str, payload: RoomUpdate, _auth: None = Depends(r
 
 @router.delete("/rooms/{room_id}")
 async def delete_room(room_id: str, _auth: None = Depends(require_auth)) -> dict[str, Any]:
+    room_dir = safe_room_storage_dir(room_id)
     if not room_store.get(room_id):
         raise HTTPException(status_code=404, detail="Room not found")
     room_store.delete(room_id)
-    room_dir = config.STORAGE_DIR / room_id
     if room_dir.exists():
         shutil.rmtree(room_dir, ignore_errors=True)
     return {"ok": True, "id": room_id}
@@ -89,6 +91,7 @@ async def delete_room(room_id: str, _auth: None = Depends(require_auth)) -> dict
 
 @router.post("/rooms/{room_id}/pins")
 async def add_pin(room_id: str, payload: RoomPinCreate, _auth: None = Depends(require_auth)) -> dict[str, Any]:
+    validate_room_id(room_id)
     pin = {
         "id": f"pin-{uuid.uuid4().hex[:8]}",
         "createdAt": payload.createdAt or _now_iso(),
@@ -102,6 +105,7 @@ async def add_pin(room_id: str, payload: RoomPinCreate, _auth: None = Depends(re
 
 @router.delete("/rooms/{room_id}/pins/{pin_id}")
 async def delete_pin(room_id: str, pin_id: str, _auth: None = Depends(require_auth)) -> dict[str, Any]:
+    validate_room_id(room_id)
     updated = room_store.remove_pin(room_id, pin_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -114,6 +118,7 @@ async def add_timeline_event(
     payload: TimelineEventCreate,
     _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
+    validate_room_id(room_id)
     event = {
         "id": f"tl-{uuid.uuid4().hex[:8]}",
         "createdAt": payload.createdAt or _now_iso(),
@@ -131,6 +136,7 @@ async def delete_timeline_event(
     event_id: str,
     _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
+    validate_room_id(room_id)
     updated = room_store.remove_timeline_event(room_id, event_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -143,6 +149,7 @@ async def create_or_rotate_share_link(
     regenerate: bool = False,
     _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
+    validate_room_id(room_id)
     updated = room_store.ensure_share_token(room_id, regenerate=regenerate)
     if not updated:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -151,6 +158,7 @@ async def create_or_rotate_share_link(
 
 @router.delete("/rooms/{room_id}/share")
 async def revoke_share_link(room_id: str, _auth: None = Depends(require_auth)) -> dict[str, Any]:
+    validate_room_id(room_id)
     updated = room_store.revoke_share_token(room_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Room not found")

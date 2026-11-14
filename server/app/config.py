@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 
@@ -44,6 +45,14 @@ TIMEZONE_SUFFIX = "+09:00"
 
 SUPPORTED_3D_EXTENSIONS = (".splat", ".spz", ".sog", ".ply", ".glb", ".usdz", ".json")
 SUPPORTED_MEDIA_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".mp4", ".mov", ".webm", ".m4a")
+SUPPORTED_VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".m4v", ".avi")
+
+SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def is_safe_id(value: str) -> bool:
+    """Return True if an entity ID is safe for URLs and filesystem subdirectories."""
+    return bool(value and SAFE_ID_PATTERN.fullmatch(value))
 
 
 def _parse_csv(raw: str) -> list[str]:
@@ -60,10 +69,14 @@ CORS_ORIGINS: list[str] = _parse_csv(_env_cors) if _env_cors else list(DEFAULT_C
 # Allow Vercel preview/prod domains unless explicitly overridden to empty string
 CORS_ORIGIN_REGEX: str | None = os.getenv("MYROOM_CORS_ORIGIN_REGEX", r"^https://[a-zA-Z0-9-]+\.vercel\.app$").strip() or None
 
-# Authentication & access control
+# Authentication, docs visibility & brute-force rate limit
 ADMIN_PASSWORD: str = os.getenv("MYROOM_ADMIN_PASSWORD", "").strip()
 AUTH_SECRET: str = os.getenv("MYROOM_AUTH_SECRET", "").strip()
 AUTH_TOKEN_TTL_SECONDS: int = int(os.getenv("MYROOM_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
+AUTH_MAX_FAILURES: int = max(3, int(os.getenv("MYROOM_AUTH_MAX_FAILURES", "5")))
+AUTH_WINDOW_SECONDS: int = max(60, int(os.getenv("MYROOM_AUTH_WINDOW_SECONDS", "300")))
+AUTH_LOCK_SECONDS: int = max(60, int(os.getenv("MYROOM_AUTH_LOCK_SECONDS", "600")))
+ENABLE_DOCS: bool = os.getenv("MYROOM_ENABLE_DOCS", "false").strip().lower() in ("1", "true", "yes")
 
 # Upload / conversion safety guards (1 GB RAM Oracle VM friendly)
 MAX_UPLOAD_MB: int = max(10, int(os.getenv("MYROOM_MAX_UPLOAD_MB", "150")))

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -22,7 +22,22 @@ async def lifespan(_app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="MyRoom 3D Spatial Server", version="2.0.0", lifespan=lifespan)
+    app = FastAPI(
+        title="MyRoom 3D Spatial Server",
+        version="2.0.0",
+        lifespan=lifespan,
+        docs_url="/docs" if config.ENABLE_DOCS else None,
+        redoc_url="/redoc" if config.ENABLE_DOCS else None,
+        openapi_url="/openapi.json" if config.ENABLE_DOCS else None,
+    )
+
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        return response
 
     cors_kwargs: dict[str, object] = {
         "allow_origins": config.CORS_ORIGINS,

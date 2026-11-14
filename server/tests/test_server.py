@@ -21,7 +21,7 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from app import application, config
+from app import application, config, security
 from app.services import korea_apis, r2_storage
 from app.store import RoomStore
 from pipeline.splat_converter import SPZ_MAGIC, convert_splat_to_spz, write_splat_file
@@ -262,6 +262,99 @@ class ServerBackendTests(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["mainPurpsCdNm"], "제2종근린생활시설")
+
+    def test_security_hardening_guards(self) -> None:
+        security.reset_rate_limiter()
+        store = RoomStore(self.db_file, legacy_json_path=self.legacy_json)
+        store.insert({"id": "room-sec-1", "title": "보안 테스트 방", "pins": []})
+
+        with (
+            patch.object(config, "STORAGE_DIR", self.storage_dir),
+            patch.object(config, "DATA_DIR", self.data_dir),
+            patch.object(config, "AUTH_SECRET_FILE", self.data_dir / ".auth_secret"),
+            patch.object(config, "ADMIN_PASSWORD", "StrongPass!2026"),
+            patch.object(config, "AUTH_SECRET", "--"),
+            patch.object(config, "AUTH_MAX_FAILURES", 5),
+            patch.object(config, "AUTH_LOCK_SECONDS", 60),
+            patch.object(config, "ENABLE_DOCS", False),
+            patch("app.routers.rooms.room_store", store),
+            patch("app.routers.uploads.room_store", store),
+            patch("app.routers.health.room_store", store),
+            patch("app.application.room_store", store),
+        ):
+            # Weak "--" secret must be ignored in favor of persisted random secret
+            signing_secret = security.get_signing_secret()
+            self.assertNotEqual(signing_secret, b"--")
+            self.assertGreaterEqual(len(signing_secret), 32)
+
+            app = application.create_app()
+
+            def call(method: str, path: str, json_body: Any = None, headers: dict[str, str] | None = None, raw: bytes = b""):
+                hdrs = {"x-real-ip": "198.51.100.10", **(headers or {})}
+                payload = raw
+                if json_body is not None:
+                    payload = json.dumps(json_body).encode("utf-8")
+                    hdrs["content-type"] = "application/json"
+                return asyncio.run(_asgi_request(app, method, path, headers=hdrs, body=payload))
+
+            # Docs hidden & security headers returned
+            status, hdrs, _ = call("GET", "/docs")
+            self.assertEqual(status, 404)
+            self.assertEqual(hdrs.get("x-content-type-options"), "nosniff")
+            self.assertEqual(hdrs.get("x-frame-options"), "DENY")
+
+            status, _, _ = call("GET", "/openapi.json")
+            self.assertEqual(status, 404)
+
+            # 5 failed logins lock IP (5th attempt triggers 429; even valid password is blocked during lockout)
+            for idx in range(4):
+                status, _, _ = call("POST", "/api/auth/login", json_body={"password": f"wrong-{idx}"})
+                self.assertEqual(status, 401)
+            status, hdrs, _ = call("POST", "/api/auth/login", json_body={"password": "wrong-5"})
+            self.assertEqual(status, 429)
+            self.assertIn("retry-after", hdrs)
+
+            # Even correct password on X-MyRoom-Password is blocked while locked
+            status, _, _ = call("GET", "/api/rooms", headers={"X-MyRoom-Password": "StrongPass!2026"})
+            self.assertEqual(status, 429)
+
+            # Separate IP can still authenticate cleanly
+            status, _, body = call(
+                "POST",
+                "/api/auth/login",
+                json_body={"password": "StrongPass!2026"},
+                headers={"x-real-ip": "198.51.100.20"},
+            )
+            self.assertEqual(status, 200)
+            token = json.loads(body)["token"]
+            ok_headers = {"x-real-ip": "198.51.100.20", "Authorization": f"Bearer {token}"}
+
+            # Path traversal room IDs blocked
+            status, _, _ = call("DELETE", "/api/rooms/..", headers=ok_headers)
+            self.assertEqual(status, 400)
+
+            # rooms/sync skips unsafe IDs and stores valid ones
+            status, _, body = call(
+                "POST",
+                "/api/rooms/sync",
+                json_body={"rooms": [{"id": "..", "title": "bad"}, {"id": "local-999", "title": "good"}]},
+                headers=ok_headers,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["syncedCount"], 1)
+            self.assertIsNone(store.get(".."))
+            self.assertIsNotNone(store.get("local-999"))
+
+            # upload-video rejects non-video extension (.html)
+            ct, mp_html = _multipart_body("file", "xss.html", "text/html", b"<script>alert(1)</script>")
+            status, _, _ = call(
+                "POST",
+                "/api/rooms/room-sec-1/upload-video",
+                headers={**ok_headers, "content-type": ct},
+                raw=mp_html,
+            )
+            self.assertEqual(status, 400)
+        security.reset_rate_limiter()
 
 
 if __name__ == "__main__":

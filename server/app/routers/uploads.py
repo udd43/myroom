@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 import uuid
@@ -14,7 +15,7 @@ from pipeline import convert_ply_to_splat, convert_splat_to_spz, parse_roomplan_
 
 from .. import config
 from ..schemas import PresignUploadRequest
-from ..security import require_auth
+from ..security import require_auth, safe_room_storage_dir, validate_room_id
 from ..services.jobs import run_video_to_3d_job
 from ..services.r2_storage import create_presigned_put_url, is_r2_enabled, upload_file_to_r2
 from ..store import room_store
@@ -48,9 +49,12 @@ async def _save_upload_with_limit(upload: UploadFile, dest: Path, max_bytes: int
 
 @router.post("/uploads/presign")
 async def presign_upload(payload: PresignUploadRequest, _auth: None = Depends(require_auth)) -> dict[str, Any]:
+    validate_room_id(payload.roomId)
     if not is_r2_enabled():
         return {"enabled": False}
-    safe_name = Path(payload.filename).name.replace(" ", "_")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(payload.filename).name).lstrip(".")
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="유효하지 않은 파일 이름입니다.")
     key = f"rooms/{payload.roomId}/{uuid.uuid4().hex[:6]}_{safe_name}"
     return create_presigned_put_url(key, content_type=payload.contentType)
 
@@ -63,13 +67,15 @@ async def upload_video(
     quality: str = Form("high"),
     _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
+    room_dir = safe_room_storage_dir(room_id)
     room = room_store.get(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    room_dir = config.STORAGE_DIR / room_id
-    room_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(file.filename or "scan.mp4").suffix.lower() or ".mp4"
+    if suffix not in config.SUPPORTED_VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 영상 형식입니다: {suffix}")
+    room_dir.mkdir(parents=True, exist_ok=True)
     video_name = f"source{suffix}"
     video_path = room_dir / video_name
     await _save_upload_with_limit(file, video_path, config.MAX_UPLOAD_BYTES)
@@ -101,6 +107,7 @@ async def upload_3d_scan(
     files: list[UploadFile] | None = File(default=None),
     _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
+    room_dir = safe_room_storage_dir(room_id)
     room = room_store.get(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -113,7 +120,6 @@ async def upload_3d_scan(
     if not uploads:
         raise HTTPException(status_code=400, detail="업로드할 3D 스캔 파일이 없습니다.")
 
-    room_dir = config.STORAGE_DIR / room_id
     room_dir.mkdir(parents=True, exist_ok=True)
     cb = int(time.time())
     patch: dict[str, Any] = {}
@@ -211,6 +217,7 @@ async def upload_pin_or_timeline_media(
     _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
     """Upload short inspection photo/video/audio clip attached to a 3D pin or timeline event."""
+    room_dir = safe_room_storage_dir(room_id)
     if not room_store.get(room_id):
         raise HTTPException(status_code=404, detail="Room not found")
 
@@ -219,7 +226,7 @@ async def upload_pin_or_timeline_media(
     if ext not in config.SUPPORTED_MEDIA_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 미디어 형식입니다: {ext}")
 
-    media_dir = config.STORAGE_DIR / room_id / "media"
+    media_dir = room_dir / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
     saved_name = f"{uuid.uuid4().hex[:10]}{ext}"
     dest = media_dir / saved_name
