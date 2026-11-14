@@ -316,14 +316,16 @@ export default function PropertyIntelPanel({
             {intel?.rentMarket?.verdict && (
               <span
                 className={`px-2 py-0.5 text-[11px] font-bold ${
-                  intel.rentMarket.verdict === "비쌈"
+                  intel.rentMarket.verdict.includes("비쌈")
                     ? "bg-danger text-white"
-                    : intel.rentMarket.verdict === "저렴"
+                    : intel.rentMarket.verdict.includes("저렴")
                       ? "bg-ok text-white"
                       : "bg-ink text-white"
                 }`}
               >
-                시세 대비 {intel.rentMarket.verdict}{" "}
+                {intel.rentMarket.verdict.startsWith("평균")
+                  ? intel.rentMarket.verdict
+                  : `시세 대비 ${intel.rentMarket.verdict}`}{" "}
                 {typeof intel.rentMarket.diffPct === "number"
                   ? `(${intel.rentMarket.diffPct > 0 ? "+" : ""}${intel.rentMarket.diffPct}%)`
                   : ""}
