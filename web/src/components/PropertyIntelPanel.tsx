@@ -164,14 +164,18 @@ export default function PropertyIntelPanel({
       const lat = room.latitude ?? resolvedLoc.lat;
       const lng = room.longitude ?? resolvedLoc.lon;
       const res = await api.getVworldBuildings(apiBase, lat, lng, 95);
-      if (!res.configured) {
-        setStatusMsg("VWorld API 키가 서버(.env)에 아직 없어 수동 건물 추가를 이용해주세요.");
+      if (!res.configured && res.buildings.length === 0) {
+        setStatusMsg("VWorld·건축물대장 API 키가 서버(.env)에 아직 없어 수동 건물 추가를 이용해주세요.");
       } else if (res.buildings.length === 0) {
-        setStatusMsg(res.error || "반경 95m 내 VWorld 3D 건물 데이터가 반환되지 않았습니다.");
+        setStatusMsg(res.error || "반경 95m 내 주변 3D 건물 데이터가 반환되지 않았습니다.");
       } else {
         const manualOnly = neighbors.filter((n) => n.source === "manual");
         onUpdateRoom({ neighborBuildings: [...manualOnly, ...res.buildings] });
-        setStatusMsg(`주변 3D 건물 ${res.buildings.length}동을 일조 그림자에 반영했습니다.`);
+        setStatusMsg(
+          res.source === "building-registry"
+            ? `주변 건물 ${res.buildings.length}동을 건축물대장·카카오 보완 조회로 일조 그림자에 반영했습니다.`
+            : `주변 3D 건물 ${res.buildings.length}동을 일조 그림자에 반영했습니다.`
+        );
       }
     } catch (e) {
       setStatusMsg(e instanceof Error ? e.message : "주변 건물 불러오기에 실패했습니다.");
@@ -463,8 +467,9 @@ export default function PropertyIntelPanel({
                   onClick={fetchVworldBuildings}
                   disabled={!serverOnline || loadingVworld}
                   className="btn-line py-0.5 text-[11px] disabled:opacity-50"
+                  title="VWorld 또는 건축물대장·카카오 API로 주변 건물 높이 자동 조회"
                 >
-                  {loadingVworld ? "불러오는 중…" : "VWorld 3D"}
+                  {loadingVworld ? "불러오는 중…" : "주변 건물 3D"}
                 </button>
                 <button
                   type="button"

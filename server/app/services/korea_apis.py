@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
+import http.client
 import json
 import math
 import statistics
@@ -565,8 +567,212 @@ def _flatten_ring(coords: Any) -> list[tuple[float, float]]:
     return ring
 
 
+def _kakao_local_get(path: str, params: dict[str, Any], timeout: float = 6.0) -> dict[str, Any]:
+    url = f"https://dapi.kakao.com{path}?{urllib.parse.urlencode(params)}"
+    headers = {"Authorization": f"KakaoAK {config.KAKAO_REST_API_KEY}"}
+    return json.loads(_http_get_raw(url, headers=headers, timeout=timeout))
+
+
+def _sample_nearby_parcels(latitude: float, longitude: float, radius_m: float) -> list[list[dict[str, Any]]]:
+    """Sample radial coordinates around target room and group hits by unique lot parcel."""
+    lat_m = 111_000.0
+    lng_m = max(30_000.0, 111_000.0 * math.cos(math.radians(latitude)))
+
+    center_parcel: tuple[str, str, str] | None = None
+    try:
+        center_res = _kakao_local_get(
+            "/v2/local/geo/coord2address.json",
+            {"x": f"{longitude:.6f}", "y": f"{latitude:.6f}"},
+        )
+        c_docs = center_res.get("documents") or []
+        if c_docs:
+            c_addr = c_docs[0].get("address") or {}
+            center_parcel = (
+                str(c_addr.get("address_name") or ""),
+                str(c_addr.get("main_address_no") or "").strip(),
+                str(c_addr.get("sub_address_no") or "0").strip() or "0",
+            )
+    except Exception:
+        pass
+
+    offsets: list[tuple[float, float]] = []
+    for ring_m in (22.0, min(48.0, radius_m * 0.52), min(78.0, radius_m * 0.85)):
+        stagger = 22.5 if 30.0 <= ring_m <= 60.0 else 0.0
+        for idx in range(8):
+            ang = math.radians(idx * 45.0 + stagger)
+            offsets.append((round(ring_m * math.sin(ang), 1), round(ring_m * math.cos(ang), 1)))
+
+    def _probe(pt: tuple[float, float]) -> dict[str, Any] | None:
+        xm, zm = pt
+        p_lat = latitude - zm / lat_m
+        p_lng = longitude + xm / lng_m
+        try:
+            res = _kakao_local_get("/v2/local/geo/coord2address.json", {"x": f"{p_lng:.6f}", "y": f"{p_lat:.6f}"})
+        except Exception:
+            return None
+        docs = res.get("documents") or []
+        if not docs:
+            return None
+        addr = docs[0].get("address") or {}
+        road = docs[0].get("road_address") or {}
+        main_no = str(addr.get("main_address_no") or "").strip()
+        sub_no = str(addr.get("sub_address_no") or "0").strip() or "0"
+        if not main_no.isdigit():
+            return None
+        if center_parcel and (str(addr.get("address_name") or ""), main_no, sub_no) == center_parcel:
+            return None
+        return {
+            "xm": xm,
+            "zm": zm,
+            "p_lat": p_lat,
+            "p_lng": p_lng,
+            "dong_key": (str(addr.get("region_2depth_name") or ""), str(addr.get("region_3depth_name") or "")),
+            "main": main_no,
+            "sub": sub_no,
+            "mtn": str(addr.get("mountain_yn") or "N"),
+            "bld": str(road.get("building_name") or "").strip(),
+            "has_road": bool(road.get("address_name")),
+        }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        hits = list(pool.map(_probe, offsets))
+
+    grouped: dict[tuple[tuple[str, str], str, str, str], list[dict[str, Any]]] = {}
+    for hit in hits:
+        if hit:
+            grouped.setdefault((hit["dong_key"], hit["mtn"], hit["main"], hit["sub"]), []).append(hit)
+
+    candidates = [
+        grp
+        for grp in grouped.values()
+        if 4.5 <= math.hypot(sum(g["xm"] for g in grp) / len(grp), sum(g["zm"] for g in grp) / len(grp)) <= radius_m * 1.3
+    ]
+    candidates.sort(
+        key=lambda grp: (
+            0 if any(g["has_road"] for g in grp) else 1,
+            0 if sum(g["zm"] for g in grp) / len(grp) >= -15.0 else 1,
+            math.hypot(sum(g["xm"] for g in grp) / len(grp), sum(g["zm"] for g in grp) / len(grp)),
+        )
+    )
+    return candidates[:10]
+
+
+def _resolve_dong_codes(candidates: list[list[dict[str, Any]]]) -> dict[tuple[str, str], tuple[str, str]]:
+    """Resolve 5-digit sigunguCd and bjdongCd once per unique legal dong in candidates."""
+    dong_codes: dict[tuple[str, str], tuple[str, str]] = {}
+    for grp in candidates:
+        dk = grp[0]["dong_key"]
+        if dk in dong_codes:
+            continue
+        try:
+            reg = _kakao_local_get(
+                "/v2/local/geo/coord2regioncode.json",
+                {"x": f"{grp[0]['p_lng']:.6f}", "y": f"{grp[0]['p_lat']:.6f}"},
+            )
+            b_doc = next((d for d in reg.get("documents", []) if d.get("region_type") == "B"), None)
+            code = str((b_doc or {}).get("code") or "")
+            if len(code) >= 10:
+                dong_codes[dk] = (code[:5], code[5:10])
+        except Exception:
+            continue
+    return dong_codes
+
+
+def _query_registry_for_group(
+    grp: list[dict[str, Any]], codes: tuple[str, str], key_q: str
+) -> dict[str, Any] | None:
+    """Query 건축물대장 표제부 sequentially for one grouped parcel and format obstacle box."""
+    p0 = grp[0]
+    sigungu, bjdong = codes
+    params = urllib.parse.urlencode(
+        {
+            "sigunguCd": sigungu,
+            "bjdongCd": bjdong,
+            "platGbCd": "1" if p0["mtn"] == "Y" else "0",
+            "bun": p0["main"].zfill(4),
+            "ji": p0["sub"].zfill(4),
+            "_type": "json",
+            "numOfRows": 5,
+            "pageNo": 1,
+        }
+    )
+    url = f"https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey={key_q}&{params}"
+    raw: str | None = None
+    for attempt in range(2):
+        try:
+            raw = _http_get_raw(url, timeout=6.0)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt == 0:
+                time.sleep(0.4)
+                continue
+            return None
+        except Exception:
+            return None
+    if not raw:
+        return None
+    err, items = _parse_data_go_kr_response(raw)
+    if err or not items:
+        return None
+
+    top = max(items, key=lambda it: (_to_float(it.get("heit")), _to_int(it.get("grndFlrCnt"))))
+    height_m = _to_float(top.get("heit"))
+    floors = _to_int(top.get("grndFlrCnt"))
+    if height_m <= 1.0:
+        height_m = max(4.0, floors * 3.2) if floors > 0 else 10.5
+    arch_area = _to_float(top.get("archArea"))
+    side_m = round(max(6.0, min(48.0, math.sqrt(arch_area))), 2) if arch_area > 0 else 12.0
+
+    avg_x = sum(g["xm"] for g in grp) / len(grp)
+    avg_z = sum(g["zm"] for g in grp) / len(grp)
+    name = (
+        next((g["bld"] for g in grp if g["bld"]), "")
+        or str(top.get("bldNm") or top.get("dongNm") or "").strip()
+        or (f"주변 건물 ({floors}층)" if floors > 0 else "주변 건물")
+    )
+    return {
+        "id": f"br-{sigungu}{bjdong}-{p0['main']}-{p0['sub']}",
+        "name": name,
+        "xM": round(avg_x, 2),
+        "zM": round(avg_z, 2),
+        "widthM": side_m,
+        "depthM": side_m,
+        "heightM": round(height_m, 2),
+        "floors": floors or max(1, round(height_m / 3.2)),
+        "distanceM": round(math.hypot(avg_x, avg_z), 1),
+        "source": "building-registry",
+    }
+
+
+def _fetch_nearby_buildings_from_kakao_registry(
+    latitude: float, longitude: float, radius_m: float = 95.0
+) -> list[dict[str, Any]]:
+    """Fallback when VWorld blocks overseas cloud IPs: probe nearby parcels via Kakao and query 건축물대장."""
+    if not (config.KAKAO_REST_API_KEY and config.DATA_GO_KR_API_KEY):
+        return []
+    candidates = _sample_nearby_parcels(latitude, longitude, radius_m)
+    if not candidates:
+        return []
+    dong_codes = _resolve_dong_codes(candidates)
+    key_q = _encode_data_go_kr_key(config.DATA_GO_KR_API_KEY)
+
+    buildings: list[dict[str, Any]] = []
+    for grp in candidates:
+        codes = dong_codes.get(grp[0]["dong_key"])
+        if not codes:
+            continue
+        item = _query_registry_for_group(grp, codes, key_q)
+        if item:
+            buildings.append(item)
+    buildings.sort(key=lambda b: b["distanceM"])
+    return buildings
+
+
 def fetch_vworld_nearby_buildings(latitude: float, longitude: float, radius_m: float = 95.0) -> dict[str, Any]:
     if not config.VWORLD_API_KEY:
+        fallback = _fetch_nearby_buildings_from_kakao_registry(latitude, longitude, radius_m)
+        if fallback:
+            return {"configured": True, "buildings": fallback, "source": "building-registry"}
         return {
             "configured": False,
             "buildings": [],
@@ -602,23 +808,31 @@ def fetch_vworld_nearby_buildings(latitude: float, longitude: float, radius_m: f
     last_exc: Exception | None = None
     for idx, url in enumerate(endpoints):
         try:
-            raw_body = _http_get_raw(url, timeout=14.0)
+            raw_body = _http_get_raw(url, timeout=6.0)
             break
         except urllib.error.HTTPError as exc:
             last_exc = exc
             if exc.code not in (502, 503, 504) or idx == len(endpoints) - 1:
                 break
-            time.sleep(0.5)
-        except (urllib.error.URLError, TimeoutError) as exc:
+            time.sleep(0.4)
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
             last_exc = exc
             if idx == len(endpoints) - 1:
                 break
-            time.sleep(0.5)
+            time.sleep(0.4)
         except Exception as exc:
             last_exc = exc
             break
 
     if raw_body is None:
+        fallback = _fetch_nearby_buildings_from_kakao_registry(latitude, longitude, radius_m)
+        if fallback:
+            return {
+                "configured": True,
+                "buildings": fallback,
+                "source": "building-registry",
+                "note": f"브이월드 연결 제한으로 건축물대장·카카오 보완 조회 사용 ({last_exc})",
+            }
         return {"configured": True, "buildings": [], "error": f"브이월드 3D 건물 조회 오류: {last_exc}"}
 
     try:
@@ -626,6 +840,9 @@ def fetch_vworld_nearby_buildings(latitude: float, longitude: float, radius_m: f
         resp = data.get("response") or {}
         if resp.get("status") != "OK":
             err = (resp.get("error") or {}).get("text") or resp.get("status") or "VWorld API 오류"
+            fallback = _fetch_nearby_buildings_from_kakao_registry(latitude, longitude, radius_m)
+            if fallback:
+                return {"configured": True, "buildings": fallback, "source": "building-registry", "note": err}
             return {"configured": True, "buildings": [], "error": err}
 
         features = (
@@ -677,7 +894,10 @@ def fetch_vworld_nearby_buildings(latitude: float, longitude: float, radius_m: f
             )
 
         buildings.sort(key=lambda b: b["distanceM"])
-        return {"configured": True, "buildings": buildings[:24]}
+        return {"configured": True, "buildings": buildings[:24], "source": "vworld"}
     except Exception as exc:
+        fallback = _fetch_nearby_buildings_from_kakao_registry(latitude, longitude, radius_m)
+        if fallback:
+            return {"configured": True, "buildings": fallback, "source": "building-registry", "note": str(exc)}
         return {"configured": True, "buildings": [], "error": f"브이월드 3D 건물 조회 오류: {exc}"}
 

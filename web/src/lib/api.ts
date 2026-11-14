@@ -334,7 +334,7 @@ export const api = {
     lat: number,
     lng: number,
     radiusM = 95
-  ): Promise<{ configured: boolean; buildings: NeighborBuilding[]; error?: string }> {
+  ): Promise<{ configured: boolean; buildings: NeighborBuilding[]; source?: string; note?: string; error?: string }> {
     return reqJson(`${base}/api/integrations/vworld/buildings?lat=${lat}&lng=${lng}&radiusM=${radiusM}`);
   },
 };

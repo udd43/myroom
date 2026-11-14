@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import http.client
 import json
 import shutil
 import struct
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
@@ -405,6 +407,96 @@ class ServerBackendTests(unittest.TestCase):
         self.assertTrue(calls[2].startswith("http://api.vworld.kr/"))
         self.assertEqual(len(res["buildings"]), 1)
         self.assertEqual(res["buildings"][0]["name"], "앞빌딩")
+
+    def test_vworld_remote_disconnected_falls_back_to_kakao_registry(self) -> None:
+        vworld_calls: list[str] = []
+
+        def fake_get(url: str, headers: Any = None, timeout: float = 10.0) -> str:
+            if "api.vworld.kr" in url:
+                vworld_calls.append(url)
+                raise http.client.RemoteDisconnected("Remote end closed connection without response")
+            if "coord2address.json" in url:
+                qs = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+                qx = float(qs["x"][0])
+                qy = float(qs["y"][0])
+                # Center coordinate is (127.0365, 37.5000); south neighbor is parcel 738-1
+                if abs(qy - 37.5000) < 1e-6 and abs(qx - 127.0365) < 1e-6:
+                    return json.dumps(
+                        {
+                            "documents": [
+                                {
+                                    "address": {
+                                        "address_name": "서울 강남구 역삼동 737",
+                                        "region_2depth_name": "강남구",
+                                        "region_3depth_name": "역삼동",
+                                        "main_address_no": "737",
+                                        "sub_address_no": "",
+                                        "mountain_yn": "N",
+                                    }
+                                }
+                            ]
+                        }
+                    )
+                if qy < 37.4999:
+                    return json.dumps(
+                        {
+                            "documents": [
+                                {
+                                    "address": {
+                                        "address_name": "서울 강남구 역삼동 738-1",
+                                        "region_2depth_name": "강남구",
+                                        "region_3depth_name": "역삼동",
+                                        "main_address_no": "738",
+                                        "sub_address_no": "1",
+                                        "mountain_yn": "N",
+                                    },
+                                    "road_address": {"address_name": "서울 강남구 테헤란로 100", "building_name": "삼성빌라"},
+                                }
+                            ]
+                        }
+                    )
+                return json.dumps({"documents": []})
+            if "coord2regioncode.json" in url:
+                return json.dumps({"documents": [{"region_type": "B", "code": "1168010100"}]})
+            if "getBrTitleInfo" in url:
+                return json.dumps(
+                    {
+                        "response": {
+                            "header": {"resultCode": "00"},
+                            "body": {
+                                "items": {
+                                    "item": {
+                                        "bldNm": "삼성빌라",
+                                        "heit": "18.4",
+                                        "grndFlrCnt": "5",
+                                        "archArea": "144",
+                                    }
+                                }
+                            },
+                        }
+                    }
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        with (
+            patch.object(config, "VWORLD_API_KEY", "test-vworld-key"),
+            patch.object(config, "KAKAO_REST_API_KEY", "test-kakao-key"),
+            patch.object(config, "DATA_GO_KR_API_KEY", "test-data-key"),
+            patch.object(korea_apis, "_http_get_raw", side_effect=fake_get),
+            patch("time.sleep", return_value=None),
+        ):
+            res = korea_apis.fetch_vworld_nearby_buildings(37.5000, 127.0365, 95.0)
+
+        self.assertEqual(len(vworld_calls), 3)
+        self.assertTrue(vworld_calls[0].startswith("https://api.vworld.kr/"))
+        self.assertTrue(vworld_calls[2].startswith("http://api.vworld.kr/"))
+        self.assertEqual(res.get("source"), "building-registry")
+        self.assertEqual(len(res["buildings"]), 1)
+        b = res["buildings"][0]
+        self.assertEqual(b["name"], "삼성빌라")
+        self.assertEqual(b["heightM"], 18.4)
+        self.assertEqual(b["floors"], 5)
+        self.assertEqual(b["widthM"], 12.0)
 
 
 if __name__ == "__main__":

@@ -108,7 +108,7 @@ export interface NeighborBuilding {
   heightM: number;
   floors?: number;
   distanceM?: number;
-  source?: "vworld" | "manual";
+  source?: "vworld" | "building-registry" | "manual";
 }
 
 export interface BjdongMeta {
